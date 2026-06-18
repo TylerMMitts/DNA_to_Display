@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 ### 3. Organize Your Data
 
-Run the organize-data command to automatically analyze and structure your dataset:
+Run the organize-data command inside of claude to reorganize your dataset:
 
 ```
 /organize-data

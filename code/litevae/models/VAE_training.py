@@ -192,6 +192,37 @@ class LiteVAELoss(nn.Module):
         return total_loss, recon_loss, kl_loss
 
 
+def get_latest_checkpoint(checkpoint_dir):
+
+    if not os.path.exists(checkpoint_dir):
+        return None, None
+    
+    # Get all checkpoint files
+    checkpoint_files = [f for f in os.listdir(checkpoint_dir) 
+                       if f.startswith('checkpoint_epoch_') and f.endswith('.pt')]
+    
+    if not checkpoint_files:
+        return None, None
+    
+    # Extract epoch numbers and find the latest
+    epoch_numbers = []
+    for f in checkpoint_files:
+        try:
+            epoch = int(f.split('_')[-1].split('.')[0])
+            epoch_numbers.append((epoch, f))
+        except:
+            continue
+    
+    if not epoch_numbers:
+        return None, None
+    
+    # Sort by epoch number and get the latest
+    epoch_numbers.sort(key=lambda x: x[0])
+    latest_epoch, latest_file = epoch_numbers[-1]
+    
+    return os.path.join(checkpoint_dir, latest_file), latest_epoch
+
+
 def train_litevae(
     # Data parameters
     data_path="data/train",
@@ -216,6 +247,7 @@ def train_litevae(
     
     # Output parameters
     save_dir="litevae_training",
+    resume=True,
     device='cuda' if torch.cuda.is_available() else 'cpu'
 ):
     
@@ -255,49 +287,128 @@ def train_litevae(
     print(f"Val samples: {dataset_info['val_size']}")
     print(f"Batches per epoch: {len(train_loader)}")
     
-    # Encoder
-    encoder = LiteVAEEncoder(
-        in_channels=3,
-        latent_channels=latent_channels,
-        feature_channels=feature_channels,
-        num_blocks=num_blocks
-    )
-    
-    # Decoder
-    decoder = LiteVAEDecoder(
-        latent_channels=latent_channels,
-        output_channels=3,
-        base_channels=base_channels,
-        num_res_blocks=num_res_blocks
-    )
-    
-    encoder = encoder.to(device)
-    decoder = decoder.to(device)
-    
-    # Count parameters
-    enc_params = sum(p.numel() for p in encoder.parameters())
-    dec_params = sum(p.numel() for p in decoder.parameters())
-    total_params = enc_params + dec_params
-    
-    print(f"Encoder parameters: {enc_params:,}")
-    print(f"Decoder parameters: {dec_params:,}")
-    print(f"Total parameters: {total_params:,}")
-    
-    # Combine parameters for optimization
-    # betas are the coefficients used for computing running averages of gradient and its square in Adam optimizer
-    # weight_decay adds L2 regularization to prevent overfitting
-    optimizer = optim.Adam(
-        list(encoder.parameters()) + list(decoder.parameters()),
-        lr=learning_rate,
-        betas=(0.9, 0.999),
-        weight_decay=1e-5
-    )
-    
-    # Learning rate scheduler that reduces the learning rate when a metric has stopped improving
-    # Good for training stability and convergence
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=True
-    )
+    start_epoch = 1
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
+    recon_losses = []
+    kl_losses = []
+
+    if resume:
+        checkpoint_dir = f"{save_dir}/checkpoints"
+        checkpoint_path, latest_epoch = get_latest_checkpoint(checkpoint_dir)
+
+        if checkpoint_path is not None:
+
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            config = checkpoint['config']
+            
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint.get('val_loss', float('inf'))
+            train_losses = checkpoint.get('train_losses', [])
+            val_losses = checkpoint.get('val_losses', [])
+            recon_losses = checkpoint.get('recon_losses', [])
+            kl_losses = checkpoint.get('kl_losses', [])
+
+            print(f"Resuming from epoch {start_epoch}")
+            print(f"Best validation loss: {best_val_loss:.4f}")
+            print(f"Train losses: {len(train_losses)} epochs")
+            print(f"Val losses: {len(val_losses)} epochs")
+            
+            # Initialize models with saved config
+            encoder = LiteVAEEncoder(
+                in_channels=3,
+                latent_channels=config['latent_channels'],
+                feature_channels=config['feature_channels'],
+                num_blocks=config['num_blocks']
+            )
+            
+            decoder = LiteVAEDecoder(
+                latent_channels=config['latent_channels'],
+                output_channels=3,
+                base_channels=config['base_channels'],
+                num_res_blocks=config['num_res_blocks']
+            )
+            
+            # Load weights
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            decoder.load_state_dict(checkpoint['decoder_state_dict'])
+            
+            encoder = encoder.to(device)
+            decoder = decoder.to(device)
+            
+            # Recreate optimizer
+            optimizer = optim.Adam(
+                list(encoder.parameters()) + list(decoder.parameters()),
+                lr=config.get('learning_rate', learning_rate),
+                betas=(0.9, 0.999),
+                weight_decay=1e-5
+            )
+            
+            # Load optimizer state
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Recreate scheduler
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=10
+            )
+            
+            # Load scheduler state
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            # Put models in training mode
+            encoder.train()
+            decoder.train()
+            
+            print("\nSuccessfully resumed training")
+            
+        else:
+            print("\nNo checkpoints found. Starting fresh training.")
+            resume = False
+
+    if not resume:
+        encoder = LiteVAEEncoder(
+            in_channels=3,
+            latent_channels=latent_channels,
+            feature_channels=feature_channels,
+            num_blocks=num_blocks
+        )
+        
+        decoder = LiteVAEDecoder(
+            latent_channels=latent_channels,
+            output_channels=3,
+            base_channels=base_channels,
+            num_res_blocks=num_res_blocks
+        )
+        
+        encoder = encoder.to(device)
+        decoder = decoder.to(device)
+        
+        # Count parameters
+        enc_params = sum(p.numel() for p in encoder.parameters())
+        dec_params = sum(p.numel() for p in decoder.parameters())
+        total_params = enc_params + dec_params
+        
+        print(f"Encoder parameters: {enc_params:,}")
+        print(f"Decoder parameters: {dec_params:,}")
+        print(f"Total parameters: {total_params:,}")
+        
+        # Combine parameters for optimization
+        optimizer = optim.Adam(
+            list(encoder.parameters()) + list(decoder.parameters()),
+            lr=learning_rate,
+            betas=(0.9, 0.999),
+            weight_decay=1e-5
+        )
+        
+        # Learning rate scheduler
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=10
+        )
     
     # Loss function
     criterion = LiteVAELoss(
@@ -305,14 +416,7 @@ def train_litevae(
         kl_weight=kl_weight
     )
     
-    # Start training loop
-    best_val_loss = float('inf')
-    train_losses = []
-    val_losses = []
-    recon_losses = []
-    kl_losses = []
-    
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, num_epochs + 1):
 
         encoder.train()
         decoder.train()
@@ -405,16 +509,36 @@ def train_litevae(
         # Step scheduler
         scheduler.step(avg_val_loss)
         
-        # Saves model checkpoints and visualizations at specified intervals
-        if epoch % save_interval == 0 or epoch == 1:
-
+        # Save checkpoint every epoch
+        torch.save({
+            'epoch': epoch,
+            'encoder_state_dict': encoder.state_dict(),
+            'decoder_state_dict': decoder.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'train_loss': avg_train_loss,
+            'val_loss': avg_val_loss,
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+            'recon_losses': recon_losses,
+            'kl_losses': kl_losses,
+            'config': {
+                'latent_channels': latent_channels,
+                'feature_channels': feature_channels,
+                'base_channels': base_channels,
+                'num_blocks': num_blocks,
+                'num_res_blocks': num_res_blocks,
+                'learning_rate': learning_rate,
+            }
+        }, f"{save_dir}/checkpoints/checkpoint_epoch_{epoch:03d}.pt")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             torch.save({
                 'epoch': epoch,
                 'encoder_state_dict': encoder.state_dict(),
                 'decoder_state_dict': decoder.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': avg_train_loss,
                 'val_loss': avg_val_loss,
                 'config': {
                     'latent_channels': latent_channels,
@@ -423,27 +547,11 @@ def train_litevae(
                     'num_blocks': num_blocks,
                     'num_res_blocks': num_res_blocks,
                 }
-            }, f"{save_dir}/checkpoints/checkpoint_epoch_{epoch:03d}.pt")
-            
-            # Save best model
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                torch.save({
-                    'epoch': epoch,
-                    'encoder_state_dict': encoder.state_dict(),
-                    'decoder_state_dict': decoder.state_dict(),
-                    'val_loss': avg_val_loss,
-                    'config': {
-                        'latent_channels': latent_channels,
-                        'feature_channels': feature_channels,
-                        'base_channels': base_channels,
-                        'num_blocks': num_blocks,
-                        'num_res_blocks': num_res_blocks,
-                    }
-                }, f"{save_dir}/checkpoints/best_model.pt")
-                print(f"New best model saved (Val Loss: {avg_val_loss:.4f})")
-            
-            # Save reconstruction visualizations
+            }, f"{save_dir}/checkpoints/best_model.pt")
+            print(f"New best model saved (Val Loss: {avg_val_loss:.4f})")
+        
+        # Save reconstruction visualizations
+        if epoch % save_interval == 0 or epoch == 1:
             with torch.no_grad():
                 # Get a batch of validation images
                 val_images = next(iter(val_loader))[:8].to(device)
@@ -589,7 +697,7 @@ if __name__ == "__main__":
     NUM_EPOCHS = 100
     LEARNING_RATE = 1e-4
     
-    # Model parameters
+    # Model parameters - matches checkpoint_epoch_055 configuration
     FEATURE_CHANNELS = 64
     BASE_CHANNELS = 512
     NUM_BLOCKS = 3
@@ -600,7 +708,7 @@ if __name__ == "__main__":
     KL_WEIGHT = 0.001
     
     # Train LiteVAE model
-    encoder, decoder, train_losses, val_losses = train_litevae(
+    encoder, decoder, train_losses, val_losses, best_val_loss = train_litevae(
         data_path=DATA_PATH,
         batch_size=BATCH_SIZE,
         image_size=IMAGE_SIZE,
@@ -614,7 +722,9 @@ if __name__ == "__main__":
         recon_weight=RECON_WEIGHT,
         kl_weight=KL_WEIGHT,
         save_dir="litevae_training",
+        resume=True,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
     
-    print("\nTraining complete!")
+    print("\nTraining complete")
+    print(f"Best validation loss: {best_val_loss:.4f}")

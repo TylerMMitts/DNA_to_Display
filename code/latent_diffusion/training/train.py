@@ -21,8 +21,8 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
-    DIFFUSION_NUMERIC_DIR, IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL,
-    SNP_PARQUET, TRAINING_RESULTS_DIR, resolve_output,
+    CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_DIR, IMAGES_DIR, IMAGE_METADATA,
+    LITEVAE_MODEL, SNP_PARQUET, TRAINING_RESULTS_DIR, resolve_output,
 )
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
@@ -41,7 +41,11 @@ MODEL_NAME = 'diffusion_numeric'
 
 class Config:
     # Data
-    image_dir = IMAGES_DIR
+    # Cropped roots, matching what LiteVAE was trained on. Note that the
+    # existing models/diffusion_numeric checkpoint was NOT trained this way -
+    # it used the uncropped dataset/images, which is the domain mismatch this
+    # setting fixes. Set this back to IMAGES_DIR only to reproduce that old run.
+    image_dir = CROPPED_IMAGES_DIR
     metadata_path = IMAGE_METADATA
     snp_parquet_path = SNP_PARQUET
     batch_size = 16

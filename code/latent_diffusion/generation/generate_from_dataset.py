@@ -18,9 +18,9 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
-    DIFFUSION_NUMERIC_DIR, IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL,
-    RESULTS_DIR, SNP_PARQUET, find_latest_checkpoint, resolve_input,
-    resolve_output,
+    CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_DIR, DIFFUSION_ONEHOT_DIR,
+    IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL, RESULTS_DIR, SNP_PARQUET,
+    find_latest_checkpoint, resolve_input, resolve_output,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -81,11 +81,20 @@ def main():
     # Edit these values, then run:
     #     python code/latent_diffusion/generation/generate_from_dataset.py
     class cfg:
-        checkpoint_dir = DIFFUSION_NUMERIC_DIR   # newest checkpoint in here is used
+        checkpoint_dir = DIFFUSION_ONEHOT_DIR    # newest checkpoint in here is used
         litevae_checkpoint = LITEVAE_MODEL
         snp_parquet = SNP_PARQUET
         metadata_path = IMAGE_METADATA
-        image_dir = IMAGES_DIR
+        # Cropped roots, not dataset/images. LiteVAE and the one-hot diffusion
+        # model were both trained on the crops, so feeding raw scans in here
+        # would compare their output against images from a distribution neither
+        # model has ever seen - the generated root would look wrong for a reason
+        # that has nothing to do with the genotype.
+        #
+        # These two settings belong together. Pointing checkpoint_dir at
+        # DIFFUSION_NUMERIC_DIR means switching image_dir back to IMAGES_DIR,
+        # because that older model was trained on the uncropped scans.
+        image_dir = CROPPED_IMAGES_DIR
         pca_cache = RESULTS_DIR / 'attention_analysis' / 'pca.pkl'
 
         output_dir = RESULTS_DIR / 'diffusion_results'

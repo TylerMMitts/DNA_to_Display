@@ -1,9 +1,17 @@
+# The LiteVAE decoder: upsamples a 4x32x32 latent back to a 256x256 image.
+
 import torch
 import torch.nn as nn
 import os
 
+from paths import RESULTS_DIR
+
 from .blocks import DecoderBlock, ResidualBlock, LiteVAEUNetBlock, SMCResidualBlock
 from ..utils.visualization import save_decoder_step, save_decoder_channels
+
+# Where save_steps=True writes its intermediate stages when the caller does not
+# name a folder. Absolute, so it never lands next to whatever launched the run.
+DEFAULT_STEP_DIR = RESULTS_DIR / 'litevae_output'
 
 
 class LiteVAEDecoder(nn.Module):
@@ -43,7 +51,7 @@ class LiteVAEDecoder(nn.Module):
             nn.Tanh()
         )
     
-    def forward(self, z, save_steps=True, save_dir="litevae_output"):
+    def forward(self, z, save_steps=True, save_dir=DEFAULT_STEP_DIR):
         
         # Create decoder output directory
         if save_steps:

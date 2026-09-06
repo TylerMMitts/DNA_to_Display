@@ -8,6 +8,26 @@ dataset/metadata/*
 results/*
 !results/.gitkeep
 
+# Trained weights are handed over as a separate folder, not through git.
+# models/root_detection.pt is already tracked and is left alone by this.
+models/*/*.pt
+
+# Part-finished browser downloads. Never worth committing, and the two sitting
+# in models/ are 5 GB of superseded diffusion checkpoints.
+*.crdownload
+*.part
+
+# Ultralytics downloads its pretrained starting weights into the working
+# directory on demand, so these are caches rather than project files.
+/yolo*.pt
+
+# Ultralytics label caches, rebuilt from the labels beside them.
+*.cache
+
+# Ultralytics writes here when a script does not set project=; the project's
+# own training runs go to results/training/ instead.
+runs/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -29,3 +49,8 @@ build/
 .idea/
 *.swp
 *.swo
+
+*.png
+*.jpg
+*.jpeg
+*.txt

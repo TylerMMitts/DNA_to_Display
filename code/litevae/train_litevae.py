@@ -1,9 +1,13 @@
+# Trains the LiteVAE autoencoder on the cropped root images.
+#
+# Weights go to models/litevae/, reconstructions and loss curves to
+# results/training/litevae/. Resumes from the newest checkpoint if one exists.
+
 import sys
 from pathlib import Path
 
-# Add workspace root to Python path
-workspace_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(workspace_root))
+# Puts code/ on the import path so this file can be run directly by path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
 import torch
@@ -19,7 +23,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+from paths import (
+    CROPPED_IMAGES_DIR, LITEVAE_DIR, TRAINING_RESULTS_DIR,
+    find_latest_checkpoint,
+)
+
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
+
+# Every checkpoint this script writes is prefixed with this, so a stray .pt file
+# still says which model produced it once it has been copied elsewhere.
+MODEL_NAME = 'litevae'
 
 
 def get_root_augmentation_transforms(image_size=256, augment=True):
@@ -192,35 +205,17 @@ class LiteVAELoss(nn.Module):
         return total_loss, recon_loss, kl_loss
 
 
+# Returns the newest checkpoint and its epoch, or (None, None) on a first run.
+# paths.find_latest_checkpoint raises when the folder holds nothing, which is
+# normal here rather than an error.
 def get_latest_checkpoint(checkpoint_dir):
+    try:
+        path = find_latest_checkpoint(checkpoint_dir, MODEL_NAME)
+    except FileNotFoundError:
+        return None, None
 
-    if not os.path.exists(checkpoint_dir):
-        return None, None
-    
-    # Get all checkpoint files
-    checkpoint_files = [f for f in os.listdir(checkpoint_dir) 
-                       if f.startswith('checkpoint_epoch_') and f.endswith('.pt')]
-    
-    if not checkpoint_files:
-        return None, None
-    
-    # Extract epoch numbers and find the latest
-    epoch_numbers = []
-    for f in checkpoint_files:
-        try:
-            epoch = int(f.split('_')[-1].split('.')[0])
-            epoch_numbers.append((epoch, f))
-        except:
-            continue
-    
-    if not epoch_numbers:
-        return None, None
-    
-    # Sort by epoch number and get the latest
-    epoch_numbers.sort(key=lambda x: x[0])
-    latest_epoch, latest_file = epoch_numbers[-1]
-    
-    return os.path.join(checkpoint_dir, latest_file), latest_epoch
+    digits = ''.join(c for c in path.stem.split('_')[-1] if c.isdigit())
+    return str(path), int(digits) if digits else None
 
 
 def train_litevae(
@@ -246,23 +241,28 @@ def train_litevae(
     save_interval=5,
     
     # Output parameters
-    save_dir="litevae_training",
+    # Weights go to models/litevae/, reconstructions and loss curves to results/.
+    save_dir=LITEVAE_DIR,
+    results_dir=TRAINING_RESULTS_DIR / MODEL_NAME,
     resume=True,
     device='cuda' if torch.cuda.is_available() else 'cpu'
 ):
-    
+
+    save_dir = Path(save_dir)
+    results_dir = Path(results_dir)
+
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print(f"Latent channels: {latent_channels}")
     print(f"Data path: {data_path}")
-    print(f"Save directory: {save_dir}")
-    
+    print(f"Checkpoints: {save_dir}")
+    print(f"Results: {results_dir}")
+
     # Create save directories
-    os.makedirs(save_dir, exist_ok=True)
-    os.makedirs(f"{save_dir}/checkpoints", exist_ok=True)
-    os.makedirs(f"{save_dir}/reconstructions", exist_ok=True)
-    os.makedirs(f"{save_dir}/logs", exist_ok=True)
-    
+    save_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / 'reconstructions').mkdir(parents=True, exist_ok=True)
+    (results_dir / 'logs').mkdir(parents=True, exist_ok=True)
+
     # Check if data exists - exit if not found
     if not os.path.exists(data_path):
         print(f"Data path {data_path} not found")
@@ -295,12 +295,11 @@ def train_litevae(
     kl_losses = []
 
     if resume:
-        checkpoint_dir = f"{save_dir}/checkpoints"
-        checkpoint_path, latest_epoch = get_latest_checkpoint(checkpoint_dir)
+        resume_path, latest_epoch = get_latest_checkpoint(save_dir)
 
-        if checkpoint_path is not None:
+        if resume_path is not None:
 
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(resume_path, map_location=device)
             config = checkpoint['config']
             
             start_epoch = checkpoint['epoch'] + 1
@@ -530,7 +529,7 @@ def train_litevae(
                 'num_res_blocks': num_res_blocks,
                 'learning_rate': learning_rate,
             }
-        }, f"{save_dir}/checkpoints/checkpoint_epoch_{epoch:03d}.pt")
+        }, save_dir / f'{MODEL_NAME}_epoch_{epoch:03d}.pt')
         
         # Save best model
         if avg_val_loss < best_val_loss:
@@ -547,7 +546,7 @@ def train_litevae(
                     'num_blocks': num_blocks,
                     'num_res_blocks': num_res_blocks,
                 }
-            }, f"{save_dir}/checkpoints/best_model.pt")
+            }, save_dir / f'{MODEL_NAME}_best.pt')
             print(f"New best model saved (Val Loss: {avg_val_loss:.4f})")
         
         # Save reconstruction visualizations
@@ -565,7 +564,7 @@ def train_litevae(
                 # Save comparison
                 comparison = torch.cat([denorm(val_images), denorm(recon_val)])
                 save_image(comparison, 
-                          f"{save_dir}/reconstructions/epoch_{epoch:03d}_reconstructions.png",
+                          results_dir / 'reconstructions' / f'epoch_{epoch:03d}_reconstructions.png',
                           nrow=8, normalize=False)
                 
                 print(f"Saved reconstruction visualization")
@@ -599,20 +598,20 @@ def train_litevae(
     plt.grid(True)
     
     plt.tight_layout()
-    plt.savefig(f"{save_dir}/logs/training_curves.png", dpi=150)
+    plt.savefig(results_dir / 'logs' / 'training_curves.png', dpi=150)
     plt.close()
     
     # Save loss history
-    np.savez(f"{save_dir}/logs/loss_history.npz",
+    np.savez(results_dir / 'logs' / 'loss_history.npz',
              train_losses=train_losses,
              val_losses=val_losses,
              recon_losses=recon_losses,
              kl_losses=kl_losses)
     
     print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Checkpoints saved to: {save_dir}/checkpoints/")
-    print(f"Visualizations saved to: {save_dir}/reconstructions/")
-    print(f"Training logs saved to: {save_dir}/logs/")
+    print(f"Checkpoints saved to: {save_dir}")
+    print(f"Visualizations saved to: {results_dir / 'reconstructions'}")
+    print(f"Training logs saved to: {results_dir / 'logs'}")
     
     return encoder, decoder, train_losses, val_losses, best_val_loss
 
@@ -687,8 +686,8 @@ def reconstruct_image(image_path, encoder, decoder, device='cuda' if torch.cuda.
 
 if __name__ == "__main__":
     
-    # Data path - put your images here
-    DATA_PATH = "results/cropped_images"
+    # Root-cropped images produced by code/crop_root_model.py
+    DATA_PATH = CROPPED_IMAGES_DIR
     
     # Training parameters
     BATCH_SIZE = 16
@@ -697,7 +696,7 @@ if __name__ == "__main__":
     NUM_EPOCHS = 100
     LEARNING_RATE = 1e-4
     
-    # Model parameters - matches checkpoint_epoch_055 configuration
+    # Model parameters
     FEATURE_CHANNELS = 64
     BASE_CHANNELS = 512
     NUM_BLOCKS = 3
@@ -721,7 +720,8 @@ if __name__ == "__main__":
         learning_rate=LEARNING_RATE,
         recon_weight=RECON_WEIGHT,
         kl_weight=KL_WEIGHT,
-        save_dir="litevae_training",
+        save_dir=LITEVAE_DIR,
+        results_dir=TRAINING_RESULTS_DIR / MODEL_NAME,
         resume=True,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )

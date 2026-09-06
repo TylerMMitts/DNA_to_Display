@@ -1,3 +1,6 @@
+# Haar wavelet transform, used by the encoder to split an image into
+# frequency sub-bands before any convolution happens.
+
 import torch
 import numpy as np
 import pywt

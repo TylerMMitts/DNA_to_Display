@@ -1,3 +1,7 @@
+# Saves each intermediate stage of an encode/decode pass as an image.
+#
+# Used by the demo to make the architecture visible one step at a time.
+
 import os
 import torch
 import numpy as np

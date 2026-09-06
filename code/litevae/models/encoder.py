@@ -1,10 +1,21 @@
+# The LiteVAE encoder: wavelet decomposition, per-level feature extraction,
+# then aggregation into a 4x32x32 latent.
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from paths import RESULTS_DIR
+
 from .blocks import ResidualBlock, LiteVAEUNetBlock
 from ..utils.wavelet import dwt_2d
-from ..utils.visualization import save_wavelet_bands, save_feature_maps, save_latent_code
+from ..utils.visualization import (
+    save_wavelet_bands, save_feature_maps, save_latent_code,
+)
+
+# Where save_steps=True writes its intermediate stages when the caller does not
+# name a folder. Absolute, so it never lands next to whatever launched the run.
+DEFAULT_STEP_DIR = RESULTS_DIR / 'litevae_output'
 
 
 class LiteVAEEncoder(nn.Module):
@@ -47,7 +58,7 @@ class LiteVAEEncoder(nn.Module):
         eps = torch.randn_like(std)
         return z_mean + eps * std
     
-    def forward(self, x, save_steps=True, save_dir="litevae_output"):
+    def forward(self, x, save_steps=True, save_dir=DEFAULT_STEP_DIR):
         
         # batch_size, channels, height, width = x.shape
         B, C, H, W = x.shape

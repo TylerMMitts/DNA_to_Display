@@ -1,3 +1,6 @@
+# The convolutional building blocks the LiteVAE encoder and decoder are made
+# of.
+
 import torch
 import torch.nn as nn
 

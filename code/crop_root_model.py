@@ -1,11 +1,24 @@
+# Finds the root in each raw scan with the YOLOv8 detector and saves a crop.
+#
+# Reads dataset/images/, writes results/cropped_images/ plus a metadata CSV
+# carrying the cropped pixel dimensions. Everything downstream trains on
+# these crops rather than the full scans.
+
 from ultralytics import YOLO
 import cv2
 import os
+import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-def get_pixel_size_from_metadata(image_filename, metadata_csv="dataset/metadata/image_metadata.csv"):
+# Puts code/ on the import path so this file can be run directly by path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[0]))
+
+from paths import CROPPED_IMAGES_DIR, IMAGES_DIR, IMAGE_METADATA, ROOT_DETECTION_MODEL
+
+
+def get_pixel_size_from_metadata(image_filename, metadata_csv=IMAGE_METADATA):
 
     if not os.path.exists(metadata_csv):
         print(f"Metadata CSV not found at {metadata_csv}")
@@ -46,11 +59,11 @@ def get_pixel_size_from_metadata(image_filename, metadata_csv="dataset/metadata/
     return None, match.iloc[0]
 
 def process_root_detection(
-    weights_path="models/root_detection.pt",
-    image_folder="dataset/images",
-    metadata_csv="dataset/metadata/image_metadata.csv",
+    weights_path=ROOT_DETECTION_MODEL,
+    image_folder=IMAGES_DIR,
+    metadata_csv=IMAGE_METADATA,
     confidence=0.70,
-    output_dir="results/cropped_images"
+    output_dir=CROPPED_IMAGES_DIR
 ):
     # Check if files exist
     if not os.path.exists(weights_path):
@@ -180,11 +193,11 @@ def process_root_detection(
         return None
 
 def batch_process_roots(
-    weights_path="models/root_detection.pt",
-    image_folder="dataset/images",
-    metadata_csv="dataset/metadata/image_metadata.csv",
+    weights_path=ROOT_DETECTION_MODEL,
+    image_folder=IMAGES_DIR,
+    metadata_csv=IMAGE_METADATA,
     confidence=0.70,
-    output_dir="results/cropped_images"
+    output_dir=CROPPED_IMAGES_DIR
 ):
 
     return process_root_detection(
@@ -198,10 +211,10 @@ def batch_process_roots(
 if __name__ == "__main__":
     # Run batch processing
     summary = batch_process_roots(
-        weights_path="models/root_detection.pt",
-        image_folder="dataset/images",
-        metadata_csv="dataset/metadata/image_metadata.csv",
+        weights_path=ROOT_DETECTION_MODEL,
+        image_folder=IMAGES_DIR,
+        metadata_csv=IMAGE_METADATA,
         confidence=0.70,
-        output_dir="results/cropped_images"
+        output_dir=CROPPED_IMAGES_DIR
     )
     

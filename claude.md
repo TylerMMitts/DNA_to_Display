@@ -2,25 +2,58 @@
 
 ```
 project_root/
-├── code/                          # All analysis and processing scripts
-│   └── crop_root_model.py        # YOLOv8-based root detection
+├── code/                          # Source only - never written to
+│   ├── paths.py                  # Every file location in the project
+│   ├── crop_root_model.py        # YOLOv8-based root detection
+│   ├── litevae/                  # Image autoencoder
+│   │   ├── models/               # Encoder, decoder, blocks, wavelet
+│   │   ├── train_litevae.py      # Training entry point
+│   │   └── evaluation/           # Reconstruction tests
+│   ├── latent_diffusion/         # Genotype-conditioned image generation
+│   │   ├── models/               # UNet, SNP encoders, LDM wrapper
+│   │   ├── data/                 # Dataset classes
+│   │   ├── diffusion/            # Scheduler and sampling
+│   │   ├── utils/                # Attention collection helpers
+│   │   ├── training/             # train_onehot.py (current), train.py (legacy)
+│   │   ├── generation/           # Image generation entry points
+│   │   ├── analysis/             # SNP attention and contribution studies
+│   │   └── validation/           # Encoding correctness checks
+│   └── feature_segmentation/     # Trait measurement
+│       ├── prepare_dataset.py    # Annotations -> YOLO dataset
+│       ├── train_segmentation.py # Training entry point
+│       ├── vessel_counting.py    # Vessel counting methods
+│       └── evaluation/           # Fidelity and accuracy tests
 ├── dataset/                       # All data files (primary working data)
 │   ├── images/                   # All LAT images (FLAT - no subfolders)
 │   │   └── [image].JPG
 │   └── metadata/                 # All metadata CSV files
 │       ├── image_metadata.csv    # Image info + genotype mapping
 │       ├── kinship_matrix.csv    # SNP-based genetic relatedness
-│       └── genotype_list.csv     # Unique genotype list
-├── models/                        # Pre-trained models
-│   └── root_detection.pt         # YOLOv8 model for root detection
-├── results/                       # All output files and results
+│       ├── genotype_list.csv     # Unique genotype list
+│       └── MEMA_gene_matrix.parquet  # SNP founder codes per genotype
+├── models/                        # Trained weights, one folder per model
+│   ├── root_detection.pt         # YOLOv8 model for root detection
+│   ├── litevae/                  # litevae_epoch_N.pt, litevae_best.pt
+│   ├── diffusion_onehot/         # diffusion_onehot_epoch_N.pt
+│   ├── diffusion_numeric/        # diffusion_numeric_epoch_N.pt (legacy)
+│   └── feature_segmentation/     # feature_segmentation_best.pt
+├── results/                       # Everything any script produces
+│   ├── cropped_images/           # Output cropped root images
+│   ├── training/                 # Per-model previews, loss curves, logs
 │   ├── figures/                  # Generated plots and visualizations
-│   ├── analysis/                 # Analysis results and statistics
-│   └── cropped_images/           # Output cropped root images
-├── README.md                      # Pipeline documentation
-├── claude.md                      # This file - project structure spec
-└── [other scripts].py            # Utility scripts in root
+│   └── analysis/                 # Analysis results and statistics
+├── README.md                      # How to use the pipeline
+└── claude.md                      # This file - project structure spec
 ```
+
+Checkpoints are named `<model>_epoch_<N>.pt` after the model that wrote them,
+so a loose `.pt` file still identifies itself. Training writes weights to
+`models/` and everything visual to `results/training/<model>/`.
+
+`code/paths.py` is the single definition of every input and output location.
+Scripts import their paths from it rather than hardcoding them, which is what
+keeps outputs out of `code/` regardless of the working directory a script is
+launched from.
 
 ## Data Organization Specifications
 

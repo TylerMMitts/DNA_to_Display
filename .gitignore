@@ -12,6 +12,12 @@ results/*
 # models/root_detection.pt is already tracked and is left alone by this.
 models/*/*.pt
 
+# Written by code/make_synthetic_project.py to mark the weights beside it as
+# random. It must never be committed: its presence is what disarms the
+# refuse-to-overwrite guard in that script, so a clone carrying this file
+# would let the synthetic minter paint over somebody's real dataset.
+models/.synthetic
+
 # Part-finished browser downloads. Never worth committing, and the two sitting
 # in models/ are 5 GB of superseded diffusion checkpoints.
 *.crdownload
@@ -27,6 +33,13 @@ models/*/*.pt
 # Ultralytics writes here when a script does not set project=; the project's
 # own training runs go to results/training/ instead.
 runs/
+
+# Virtual environments. uv creates .venv in the project root on the first
+# `uv run`; uv.lock beside it IS committed, so every machine resolves the same
+# versions. .python-version is left to the machine.
+.venv/
+venv/
+.python-version
 
 # Python cache
 __pycache__/

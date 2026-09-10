@@ -48,6 +48,36 @@ DIFFUSION_NUMERIC_MODEL = DIFFUSION_NUMERIC_DIR / 'diffusion_numeric_epoch_500.p
 # curves are results, so they land here instead of beside the weights.
 TRAINING_RESULTS_DIR = RESULTS_DIR / 'training'
 
+# Written by code/make_synthetic_project.py next to the weights it mints.
+# While it exists, the weights are random and the dataset is drawn rather than
+# photographed, so nothing produced from them means anything.
+SYNTHETIC_MARKER = MODELS_DIR / '.synthetic'
+
+
+# Printed once per process, on import, because every script in the project
+# imports this module. A stand-in checkpoint is invisible otherwise: it loads
+# without complaint and the analysis scripts will happily rank which SNP
+# matters most in a network that was never trained.
+def _warn_if_synthetic():
+    import multiprocessing
+    import sys
+
+    if not SYNTHETIC_MARKER.exists():
+        return
+    # DataLoader workers re-import this module, so without this the banner
+    # prints once per worker on every run.
+    if multiprocessing.current_process().name != 'MainProcess':
+        return
+    bar = '=' * 72
+    print(f"\n{bar}\n  SYNTHETIC PROJECT - random weights, drawn images.\n"
+          "  Nothing generated or measured here is a real result.\n"
+          f"  Delete {SYNTHETIC_MARKER} once real weights are in place.\n{bar}\n",
+          file=sys.stderr)
+
+
+_warn_if_synthetic()
+
+
 # The stem used for checkpoint filenames, keyed by the folder holding them.
 # Kept in one place so a rename only has to happen here.
 MODEL_NAMES = {

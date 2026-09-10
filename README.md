@@ -229,6 +229,46 @@ producer first:
 check on whether genotype actually predicts phenotype here, rather than the
 model producing plausible roots that ignore their conditioning.
 
+## Getting it running
+
+```
+uv run code/preflight.py
+```
+
+That is the whole setup. uv reads `pyproject.toml`, builds a matching
+environment on first use, and preflight reports whether this machine can run the
+pipeline - packages, GPU, dataset, and whether every checkpoint actually loads -
+ending in either `READY.` or the single next command to fix what is missing. It
+writes nothing. On Windows, follow `RUNNING_ON_WINDOWS.md` instead, which covers
+getting a CUDA build of PyTorch without hunting for wheels.
+
+Checkpoints need no conversion between machines. Every loader passes
+`map_location`, so a checkpoint written on any device loads on any other.
+
+### Running with no weights or data
+
+The weights and scans are handed over as folders rather than through git, so a
+fresh clone has neither. To exercise the pipeline before they arrive:
+
+```
+uv run code/make_synthetic_project.py
+```
+
+This mints a complete stand-in project - drawn root images, metadata, a founder
+mosaic SNP matrix, and random-weight checkpoints for every model - so all
+scripts in the repo run end to end. It is a genuine rehearsal rather than a
+plumbing check: vessel count, stele size and root radius are deterministic
+functions of designated causal loci, so the synthetic set carries real
+genotype-to-phenotype signal, training on it converges, and
+`genetic_fidelity_test.py` has a right answer to find.
+
+It is not a source of results. The weights are freshly initialised, so anything
+generated is noise and any analysis is measuring an untrained network. The
+script stamps `models/.synthetic`, and while that file exists every script
+prints a banner saying so. It refuses to run over what looks like real data, and
+it is git-ignored so it can never travel to another clone. Delete it once real
+weights are in place.
+
 ## Notes on running this
 
 No CUDA is required. Every script asks `paths.pick_device()`, which takes an

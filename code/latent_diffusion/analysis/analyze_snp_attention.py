@@ -20,6 +20,7 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     DIFFUSION_ONEHOT_MODEL, KINSHIP_MATRIX, LITEVAE_MODEL, RESULTS_DIR,
     SNP_PARQUET, resolve_input, resolve_output,
 )
@@ -495,7 +496,7 @@ def main():
         seed = 0
         latent_size = 32
         chunk_size = 16               # lower this if you run out of GPU memory
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
         # Repeat the whole measurement on randomly initialised weights. Slower,
         # but without it a positive correlation is not interpretable.

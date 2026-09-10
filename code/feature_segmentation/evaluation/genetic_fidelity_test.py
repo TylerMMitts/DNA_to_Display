@@ -21,6 +21,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     CROPPED_IMAGES_DIR, DIFFUSION_ONEHOT_DIR, IMAGE_METADATA, LITEVAE_MODEL,
     RESULTS_DIR, SEGMENTATION_MODEL, SNP_PARQUET, find_latest_checkpoint,
     resolve_input, resolve_output,
@@ -237,7 +238,7 @@ def main():
         min_vessel_px = 4
         connectivity = 2
         n_permutations = 1000
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)

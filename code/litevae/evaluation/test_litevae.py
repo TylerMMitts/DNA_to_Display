@@ -20,7 +20,7 @@ from pathlib import Path
 # Puts code/ on the import path so this file can be run directly by path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from paths import DATASET_DIR, LITEVAE_MODEL, RESULTS_DIR
+from paths import DATASET_DIR, LITEVAE_MODEL, RESULTS_DIR, pick_device
 
 # Import your LiteVAE models
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
@@ -28,7 +28,8 @@ from litevae.models import LiteVAEEncoder, LiteVAEDecoder
 
 class LiteVAETester:
     
-    def __init__(self, checkpoint_path, device='cuda'):
+    def __init__(self, checkpoint_path, device=None):
+        device = device or pick_device()
         self.device = device
         
         # Load checkpoint
@@ -287,7 +288,7 @@ def main():
     CHECKPOINT_PATH = LITEVAE_MODEL
     TEST_FOLDER = DATASET_DIR / 'test_reconstruction_images'
     OUTPUT_DIR = RESULTS_DIR / 'litevae_test_results'
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    DEVICE = pick_device()
 
     tester = LiteVAETester(CHECKPOINT_PATH, device=DEVICE)
 

@@ -24,6 +24,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_MODEL, DIFFUSION_ONEHOT_DIR,
     IMAGE_METADATA, LITEVAE_MODEL, SNP_PARQUET, TRAINING_RESULTS_DIR,
     best_checkpoint_path, checkpoint_path, find_latest_checkpoint,
@@ -211,7 +212,7 @@ def main():
         num_workers = 4
         image_size = 256
         seed = 0
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -317,11 +318,11 @@ def main():
     train_loader = DataLoader(
         ProjectedRootDataset(train_samples, make_transforms(cfg.image_size, True)),
         batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers,
-        pin_memory=True, drop_last=True)
+        pin_memory=torch.cuda.is_available(), drop_last=True)
     val_loader = DataLoader(
         ProjectedRootDataset(val_samples, make_transforms(cfg.image_size, False)),
         batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
-        pin_memory=True)
+        pin_memory=torch.cuda.is_available())
 
     if resume_ckpt is not None:
         encoder_config = resume_ckpt['snp_encoder_config']

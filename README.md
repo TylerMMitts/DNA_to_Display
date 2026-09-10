@@ -231,9 +231,22 @@ model producing plausible roots that ignore their conditioning.
 
 ## Notes on running this
 
-Scripts pick CUDA automatically when it is available and fall back to CPU.
-Diffusion sampling on CPU is slow enough that you should set `max_images` to
-something small for a first pass.
+No CUDA is required. Every script asks `paths.pick_device()`, which takes an
+NVIDIA GPU if there is one, Apple's Metal backend (MPS) on Apple silicon, and
+CPU otherwise. Set `DNA_DEVICE=cpu` (or `mps`, or `cuda`) to force one - useful
+when an MPS operator is missing, or to get a CPU baseline.
+
+Measured on an M4 Max, warm, torch 2.14:
+
+| | CPU | MPS |
+|---|---|---|
+| LiteVAE train step, batch 8 | 2420 ms | 433 ms |
+| Diffusion train step, batch 16 | 3660 ms | 276 ms |
+| DDIM generation, 50 steps | 1000 ms/image | 186 ms/image |
+| `root_detection` inference | 126 ms | 24 ms |
+
+CPU alone works, it is just 6-13x slower. If you are stuck on CPU, set
+`max_images` to something small for a first pass.
 
 `train_segmentation.py` defaults to CPU with `workers = 0` on purpose. On
 Windows, Ultralytics' default of 8 dataloader workers spawns processes that each

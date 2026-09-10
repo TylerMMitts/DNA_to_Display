@@ -116,7 +116,11 @@ def process_root_detection(
             print(f"Could not read image {img_path}")
             continue
         
-        if results[0].boxes is not None:
+        # An image the detector found nothing in still carries a Boxes
+        # object, just an empty one - so testing for None alone let an
+        # empty list through and indexing it killed the whole batch run
+        # on the first difficult scan.
+        if results[0].boxes is not None and len(results[0].boxes) > 0:
             boxes = results[0].boxes
             
             # Find the detection with the highest confidence

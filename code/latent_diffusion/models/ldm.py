@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from paths import pick_device
 from .unet import DenoisingUNet
 from .snp_encoder import SNPEncoder
 
@@ -18,10 +19,14 @@ class LatentDiffusionModel(nn.Module):
                  snp_encoder=None,
                  unet=None,
                  scheduler=None,
-                 device='cuda'):
+                 device=None):
         
         super().__init__()
-        
+
+        # No device given means 'whatever this machine actually has'.
+        if device is None:
+            device = pick_device()
+
         # LiteVAE components (pretrained, frozen)
         self.litevae_encoder = litevae_encoder
         self.litevae_decoder = litevae_decoder

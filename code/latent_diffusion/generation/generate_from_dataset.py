@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_DIR, DIFFUSION_ONEHOT_DIR,
     IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL, RESULTS_DIR, SNP_PARQUET,
     find_latest_checkpoint, resolve_input, resolve_output,
@@ -111,7 +112,7 @@ def main():
         seed = 0                  # base seed; each image gets seed + its row index
         imgsz = 256
         latent_size = 32
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
     device = torch.device(cfg.device)
     out_root = resolve_output(cfg.output_dir)

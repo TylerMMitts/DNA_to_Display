@@ -15,10 +15,27 @@ class DiffusionScheduler:
         # Precompute alpha values (the amount of the original image is preserved at each step) and their cumulative product (alpha_bar)
         self.alphas = 1.0 - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-        
+
+    # The schedule is three plain tensors, not module buffers, so a model's
+    # .to(device) does not carry them along. Callers used to move all three by
+    # hand at every call site; they can call this instead.
+    def to(self, device):
+        self.betas = self.betas.to(device)
+        self.alphas = self.alphas.to(device)
+        self.alpha_bars = self.alpha_bars.to(device)
+        return self
+
+    # Indexing a tensor requires the index to live on the same device as the
+    # table. Rather than making every caller remember that, the lookup is done
+    # on the table's device and the result is moved to wherever the latent is.
+    # Without this, a CPU schedule and an MPS timestep raise "indices should be
+    # either on cpu or on the same device as the indexed tensor".
+    def _lookup(self, table, t, like):
+        return table[t.to(table.device)].view(-1, 1, 1, 1).to(like.device)
+
     def add_noise(self, z, noise, t):
         # Gets alpha_bar value and reshapes it to match the dimensions of z for broadcasting
-        alpha_bar = self.alpha_bars[t].view(-1, 1, 1, 1)
+        alpha_bar = self._lookup(self.alpha_bars, t, z)
 
         # Adds noise to the latent z according to the diffusion process formula
         z_t = torch.sqrt(alpha_bar) * z + torch.sqrt(1 - alpha_bar) * noise
@@ -28,7 +45,7 @@ class DiffusionScheduler:
     # This is used after the model is already trained and we want to generate new images from noise
     def denoise_step(self, z_t, noise_pred, t, t_prev=None, eta=0.0):
 
-        alpha_bar_t = self.alpha_bars[t].view(-1, 1, 1, 1)
+        alpha_bar_t = self._lookup(self.alpha_bars, t, z_t)
 
         # Only valid when sampling every single timestep (num_steps == self.num_steps).
         # Any strided/accelerated schedule must pass t_prev explicitly.
@@ -38,8 +55,8 @@ class DiffusionScheduler:
         # alpha_bar is defined as 1.0 "before" step 0, i.e. the fully denoised sample.
         t_prev_idx = torch.clamp(t_prev, min=0)
         alpha_bar_prev = torch.where(
-            t_prev.view(-1, 1, 1, 1) >= 0,
-            self.alpha_bars[t_prev_idx].view(-1, 1, 1, 1),
+            t_prev.view(-1, 1, 1, 1).to(z_t.device) >= 0,
+            self._lookup(self.alpha_bars, t_prev_idx, z_t),
             torch.ones_like(alpha_bar_t),
         )
 
@@ -56,7 +73,7 @@ class DiffusionScheduler:
         z_prev = torch.sqrt(alpha_bar_prev) * z_0_pred + direction
 
         if eta > 0:
-            mask = (t_prev.view(-1, 1, 1, 1) >= 0).float()
+            mask = (t_prev.view(-1, 1, 1, 1).to(z_t.device) >= 0).float()
             z_prev = z_prev + mask * sigma * torch.randn_like(z_t)
 
         return z_prev

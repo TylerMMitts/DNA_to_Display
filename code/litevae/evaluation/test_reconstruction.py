@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import torch.nn.functional as F
 
-from paths import DATASET_DIR, LITEVAE_MODEL, RESULTS_DIR
+from paths import DATASET_DIR, LITEVAE_MODEL, RESULTS_DIR, pick_device
 
 # Import directly from the model files (not through the package)
 from litevae.models.encoder import LiteVAEEncoder
@@ -29,8 +29,8 @@ CHECKPOINT_PATH = LITEVAE_MODEL
 TEST_IMAGES_PATH = DATASET_DIR / 'test_reconstruction_images'
 OUTPUT_DIR = RESULTS_DIR
 
-# Device to use ('cuda' or 'cpu')
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+# Device to use - set DNA_DEVICE to override what pick_device() chooses.
+DEVICE = pick_device()
 
 # Target image size (must match training size)
 IMAGE_SIZE = 256
@@ -40,7 +40,7 @@ SIMILARITY_THRESHOLD = 0.7  # Minimum similarity (0-1) for latent averaging
 TOP_K_LATENTS = 5          # Number of similar latents to consider for averaging
 
 
-def load_model(checkpoint_path: str, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+def load_model(checkpoint_path: str, device: str = pick_device()):
     # Load a trained LiteVAE model from checkpoint.
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']

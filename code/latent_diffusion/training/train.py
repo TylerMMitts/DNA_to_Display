@@ -21,6 +21,7 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_DIR, IMAGES_DIR, IMAGE_METADATA,
     LITEVAE_MODEL, SNP_PARQUET, TRAINING_RESULTS_DIR, resolve_output,
 )
@@ -69,7 +70,7 @@ class Config:
     # Weights go to models/diffusion_numeric/, loss logs to results/training/.
     save_dir = DIFFUSION_NUMERIC_DIR
     results_dir = TRAINING_RESULTS_DIR / MODEL_NAME
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = pick_device()
 
     # LiteVAE
     litevae_checkpoint_path = LITEVAE_MODEL
@@ -86,7 +87,8 @@ def load_image_metadata(metadata_path):
         genotype_to_images[genotype].append(image_file)
     return genotype_to_images, df
 
-def load_litevae(checkpoint_path, device='cuda'):
+def load_litevae(checkpoint_path, device=None):
+    device = device or pick_device()
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)

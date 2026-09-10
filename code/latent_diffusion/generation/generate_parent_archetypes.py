@@ -20,6 +20,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     DIFFUSION_ONEHOT_DIR, LITEVAE_MODEL, RESULTS_DIR, SEGMENTATION_MODEL,
     SNP_PARQUET, find_latest_checkpoint, resolve_input, resolve_output,
 )
@@ -322,7 +323,7 @@ def main():
         imgsz = 256
         latent_size = 32
         batch_size = 8
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)

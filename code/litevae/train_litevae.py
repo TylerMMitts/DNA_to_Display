@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 from paths import (
+    pick_device,
     CROPPED_IMAGES_DIR, LITEVAE_DIR, TRAINING_RESULTS_DIR,
     find_latest_checkpoint,
 )
@@ -120,7 +121,7 @@ def create_dataloaders(data_path, batch_size=16, image_size=256,
         batch_size=batch_size, 
         shuffle=True, 
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
         drop_last=True
     )
     
@@ -129,7 +130,7 @@ def create_dataloaders(data_path, batch_size=16, image_size=256,
         batch_size=batch_size, 
         shuffle=False, 
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=torch.cuda.is_available()
     )
     
     dataset_info = {
@@ -245,7 +246,7 @@ def train_litevae(
     save_dir=LITEVAE_DIR,
     results_dir=TRAINING_RESULTS_DIR / MODEL_NAME,
     resume=True,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device=pick_device()
 ):
 
     save_dir = Path(save_dir)
@@ -617,7 +618,7 @@ def train_litevae(
 
 
 # Loads model for reconstruction or inference
-def load_litevae_model(checkpoint_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def load_litevae_model(checkpoint_path, device=pick_device()):
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
@@ -653,7 +654,7 @@ def load_litevae_model(checkpoint_path, device='cuda' if torch.cuda.is_available
     return encoder, decoder, config
 
 
-def reconstruct_image(image_path, encoder, decoder, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def reconstruct_image(image_path, encoder, decoder, device=pick_device()):
     
     # Load and preprocess image
     transform = transforms.Compose([
@@ -723,7 +724,7 @@ if __name__ == "__main__":
         save_dir=LITEVAE_DIR,
         results_dir=TRAINING_RESULTS_DIR / MODEL_NAME,
         resume=True,
-        device='cuda' if torch.cuda.is_available() else 'cpu'
+        device=pick_device()
     )
     
     print("\nTraining complete")

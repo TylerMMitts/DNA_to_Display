@@ -4,13 +4,18 @@
 import torch
 from tqdm import tqdm
 
+from paths import pick_device
+
 
 class DDIMSampler:
 
-    def __init__(self, model, scheduler, device='cuda'):
+    # device=None means 'whatever this machine actually has', the same rule
+    # every other entry point follows. A hardcoded default here would quietly
+    # strand a CUDA box on the CPU.
+    def __init__(self, model, scheduler, device=None):
+        self.device = device if device is not None else pick_device()
         self.model = model
         self.scheduler = scheduler
-        self.device = device
         
     def sample(self, kinship, num_steps=50, guidance_scale=7.5, eta=0.0):
         

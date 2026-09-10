@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw
 # Puts code/ on the import path so this file can be run directly by path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from paths import RESULTS_DIR, SEGMENTATION_MODEL, resolve_input, resolve_output
+from paths import RESULTS_DIR, SEGMENTATION_MODEL, resolve_input, resolve_output, pick_device
 
 from ultralytics import YOLO
 
@@ -113,7 +113,7 @@ def main():
         watershed_min_distances = [2, 3, 4, 5, 6, 8]
         opening_radii = [1, 2]
 
-        device = 'cuda' if __import__('torch').cuda.is_available() else 'cpu'
+        device = pick_device()
 
     out = resolve_output(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)

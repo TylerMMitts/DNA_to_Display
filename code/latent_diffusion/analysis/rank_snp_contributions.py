@@ -48,6 +48,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
+    pick_device,
     DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SNP_PARQUET, resolve_input,
     resolve_output,
 )
@@ -243,7 +244,7 @@ def main():
         layer = 'up_2'
         latent_size = 32
         seed = 0
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = pick_device()
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)

@@ -30,7 +30,7 @@ class DDIMSampler:
         
         # Encode kinship
         with torch.no_grad():
-            snp_embedding = self.model.kinship_encoder(kinship)
+            snp_embedding = self.model.snp_encoder(kinship)
 
         # Creates an embedding of all zeros, which is used for unconditional guidance
         # This is used to generate a sample without any conditioning information

@@ -29,6 +29,32 @@ KINSHIP_MATRIX = METADATA_DIR / 'kinship_matrix.csv'
 IMAGE_METADATA = METADATA_DIR / 'image_metadata.csv'
 SEGMENTATION_DATASET = DATASET_DIR / 'root_features_256'
 
+# The seed-kernel dataset. Same eight founders and the same one-hot treatment as
+# the root data, but a different locus set (33,527 against 43,788), founders
+# named rather than numbered, and about 500 genotypes instead of 200. Everything
+# it produces stays under its own folder so the two datasets never mix.
+SEED_SCANS_DIR = DATASET_DIR / 'seed_scans'
+SEED_GENETIC_DIR = DATASET_DIR / 'seed_genetic'
+SEED_SNP_PARQUET = SEED_GENETIC_DIR / 'MEMA_complete_pop_B73v5_gene_matrix.parquet'
+
+SEED_RESULTS_DIR = RESULTS_DIR / 'seeds'
+SEED_CROPPED_DIR = SEED_RESULTS_DIR / 'cropped_images'
+# Written by crop_seed_scans.py: one row per image, carrying the scale bar it
+# measured before cropping the bar away.
+SEED_IMAGE_METADATA = SEED_RESULTS_DIR / 'seed_image_metadata.csv'
+
+# What the models actually train on: every kernel at one common scale, on a
+# square canvas. rescale_seed_crops.py writes both.
+SEED_SCALED_DIR = SEED_RESULTS_DIR / 'scaled_images'
+SEED_SCALED_METADATA = SEED_RESULTS_DIR / 'seed_scaled_metadata.csv'
+
+# The seed dataset gets its own autoencoder. The root LiteVAE was fitted to
+# photographed cross-sections and would be compressing something it has never
+# seen, so the diffusion model would be learning in a latent space that does not
+# represent kernels well.
+SEED_LITEVAE_DIR = MODELS_DIR / 'litevae_seeds'
+SEED_LITEVAE_MODEL = SEED_LITEVAE_DIR / 'litevae_seeds_best.pt'
+
 # One folder of weights per trainable model, and every checkpoint inside it is
 # prefixed with that model's name. A loose checkpoint_epoch_100.pt says nothing
 # about which model wrote it once it has been copied somewhere else.
@@ -53,6 +79,7 @@ TRAINING_RESULTS_DIR = RESULTS_DIR / 'training'
 MODEL_NAMES = {
     SEGMENTATION_DIR: 'feature_segmentation',
     LITEVAE_DIR: 'litevae',
+    SEED_LITEVAE_DIR: 'litevae_seeds',
     DIFFUSION_ONEHOT_DIR: 'diffusion_onehot',
     DIFFUSION_NUMERIC_DIR: 'diffusion_numeric',
 }

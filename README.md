@@ -160,6 +160,73 @@ It prepares the annotated dataset if that has not been done, trains, then
 copies the best weights to `models/feature_segmentation/` and validates them.
 Plots and logs go to `results/training/feature_segmentation/`.
 
+## The seed dataset
+
+A second dataset of seed kernel plates, about 500 genotypes with one image each.
+Same eight founders and the same one-hot treatment as the roots, but a different
+locus set, so it gets its own models throughout and never shares weights with
+the root pipeline.
+
+Each dataset has its own training scripts rather than one script with a switch,
+so which dataset you are training is decided by which file you run.
+
+**1. Crop the plates.**
+
+```bash
+python code/crop_seed_scans.py
+```
+
+Reads `dataset/seed_scans/`, writes `results/seeds/cropped_images/` and
+`seed_image_metadata.csv`. The plates carry a genotype name above the kernel and
+a scale bar below it; both are cropped away, but the bar is measured first. It
+has to be: every plate was rendered to a fixed kernel height, so the bar is the
+only record of how large the kernel really is.
+
+**2. Put every kernel at one scale.**
+
+```bash
+python code/rescale_seed_crops.py
+```
+
+Resizes each crop by its own bar length and pads it onto a 256x256 canvas, so
+kernels differ in pixels exactly as much as they differ in life - a 2x range
+that is invisible in the plates as rendered. Padding, not resizing to fit:
+resizing each image to the canvas would make every kernel the same size again.
+
+**3. Train the seed autoencoder.**
+
+```bash
+python code/litevae/train_litevae_seeds.py
+```
+
+Weights to `models/litevae_seeds/`, reconstructions and loss curve to
+`results/training/litevae_seeds/`. The root LiteVAE is not a substitute: it was
+fitted to photographed cross-sections, and the diffusion model trains inside
+whatever latent space the autoencoder provides.
+
+**4. Train the seed diffusion model.**
+
+```bash
+python code/latent_diffusion/training/train_seeds.py
+```
+
+Weights to `models/diffusion_seeds_<size>/`, previews and loss history to
+`results/training/diffusion_seeds_<size>/`. Needs step 3 finished first. Sizes
+and the genotype-gain readout work exactly as they do for the root trainer.
+
+On Hellbender, autoencoder first and then the diffusion model:
+
+```bash
+sbatch code/litevae/train_litevae_seeds_hellbender.sbatch
+sbatch code/latent_diffusion/training/train_seeds_hellbender.sbatch
+```
+
+Augmentation differs from the root trainers on purpose. Kernels have a real top
+and bottom and every plate is drawn the same way up, so vertical flips and
+rotations are off. Colour jitter is off too: the plates encode kernel colour as
+horizontal bands, making colour a trait being predicted rather than a nuisance
+to be robust to. Horizontal flips are all that remain.
+
 ## Changing settings
 
 Every runnable script keeps its settings in one `class cfg` block at the top of

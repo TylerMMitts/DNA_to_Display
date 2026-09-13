@@ -5,6 +5,8 @@
 # what are really unordered category labels. snp_encoding.py replaces it and
 # is what the current model uses; this stays for loading older checkpoints.
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -199,5 +201,50 @@ def load_snp_data_from_parquet(parquet_path):
     
     # Replace any missing values (NaN) with -1
     snp_array = np.nan_to_num(snp_array, nan=-1.0)
-    
+
+    return sample_names, snp_names, snp_array
+
+
+# Loads the seed population's SNP table, which is laid out differently.
+#
+# Founders are named there rather than numbered ('ZAPZAP', 'GORGOR'), each row
+# carries its genomic coordinates, and the locus set is a different one (33,527
+# against the root table's 43,788). The names are mapped onto the same 1-8 codes
+# the one-hot encoding expects, sorted first so a given founder always gets the
+# same code no matter which subset of the table is loaded.
+#
+# Every genotype in this table is homozygous, so each entry is one founder name
+# written twice. A heterozygous entry would need a different encoding than the
+# eight-slot one-hot, so it stops the run rather than being folded into a ninth
+# founder code that nothing downstream would understand.
+def load_seed_snp_data_from_parquet(parquet_path):
+    df = pd.read_parquet(parquet_path, columns=['ID', 'B73v5_ID', 'genotype'])
+
+    print(f"Loaded {len(df)} SNP records")
+    print(f"Unique samples: {df['ID'].nunique()}")
+    print(f"Unique SNPs: {df['B73v5_ID'].nunique()}")
+
+    calls = df['genotype'].astype(str)
+    first = calls.apply(lambda s: s[:len(s) // 2])
+    second = calls.apply(lambda s: s[len(s) // 2:])
+    heterozygous = first != second
+    if heterozygous.any():
+        examples = sorted(calls[heterozygous].unique())[:5]
+        raise SystemExit(
+            f"{heterozygous.sum()} heterozygous calls in {Path(parquet_path).name} "
+            f"(for example {examples}). The one-hot encoding gives each locus one "
+            "slot per founder, which cannot represent two different founders at "
+            "the same locus.")
+
+    founder_names = sorted(first.unique())
+    codes = {name: i + 1 for i, name in enumerate(founder_names)}
+    print(f"Founder names -> codes: {codes}")
+
+    df = df.assign(code=first.map(codes).astype(np.float32))
+    snp_matrix = df.pivot(index='ID', columns='B73v5_ID', values='code')
+
+    sample_names = snp_matrix.index.tolist()
+    snp_names = snp_matrix.columns.tolist()
+    snp_array = np.nan_to_num(snp_matrix.values.astype(np.float32), nan=-1.0)
+
     return sample_names, snp_names, snp_array

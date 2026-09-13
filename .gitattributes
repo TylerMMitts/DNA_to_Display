@@ -1,0 +1,3 @@
+# Cluster job scripts run under Linux bash, which rejects Windows line endings.
+*.sbatch text eol=lf
+*.sh text eol=lf

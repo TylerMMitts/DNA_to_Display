@@ -142,7 +142,9 @@ def main():
         image_size = 256
         seed = 0
 
-        # Saves reconstructions and a loss curve this often, in epochs.
+        # How often to save a checkpoint, reconstructions and the loss curve,
+        # in epochs. The best checkpoint is written whenever validation improves
+        # regardless of this.
         save_interval = 5
         resume = True
         device = pick_device()
@@ -307,13 +309,23 @@ def main():
                 'dataset': 'seeds',
             }, path)
 
-        save_checkpoint(checkpoint_path(save_dir, epoch, MODEL_NAME))
+        # Every save_interval epochs rather than every epoch. These carry the
+        # optimizer and scheduler state as well as the weights, so they are
+        # around 200 MB each - one per epoch over a 250 epoch run is about 50 GB
+        # and will exhaust a cluster quota. The last epoch is always kept, so
+        # the end of a run is never left unsaved when num_epochs is not a
+        # multiple of the interval.
+        periodic = epoch % cfg.save_interval == 0 or epoch == cfg.num_epochs
+        if periodic:
+            save_checkpoint(checkpoint_path(save_dir, epoch, MODEL_NAME))
+        # The best one is kept whenever it improves, whatever epoch that lands
+        # on, so the most useful checkpoint is never the one that got skipped.
         if val_loss < best_val:
             best_val = val_loss
             save_checkpoint(best_path)
             print(f"  new best validation loss {best_val:.4f}")
 
-        if epoch % cfg.save_interval == 0 or epoch == start_epoch:
+        if periodic or epoch == start_epoch:
             with torch.no_grad():
                 images = next(iter(val_loader))[:8].to(device)
                 recon = decoder(encoder(images, save_steps=False)[0], save_steps=False)

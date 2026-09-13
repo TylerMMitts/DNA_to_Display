@@ -171,12 +171,22 @@ def main():
         pca_cache = RESULTS_DIR / 'attention_analysis' / 'pca.pkl'       # legacy path only
         sensitivity_cache = RESULTS_DIR / 'snp_diverse_maps' / 'population_sensitivity.csv'
 
-        top_n = 50                # final diverse set
+        top_n = 5                 # final diverse set
         # Candidate pool: the top n_pool loci by measured magnitude, before
         # diversifying. Must be >> top_n or there is nothing to diversify
         # among; must not be too close to n_loci or the magnitude floor stops
         # doing its job of keeping noise out.
-        n_pool = 1000
+        n_pool = 250
+
+        # Skips the genome-wide measured sweep and builds the pool from the
+        # linear influence proxy instead. Hours to minutes, at the cost of a
+        # pool chosen by proxy rather than by measured effect. The diversity
+        # selection itself is unchanged - it still runs on real spatial
+        # signatures computed for every locus in the pool.
+        pool_from_proxy = True
+        # Minimum gap between pooled loci, so the pool spans the genome rather
+        # than sampling one linked block repeatedly. Only used with the proxy.
+        pool_spacing = 150
 
         n_sweep_genotypes = 4     # for the full-genome magnitude sweep (stage 1)
         n_signature_genotypes = 8  # for the candidate pool's spatial maps (stage 2)
@@ -248,18 +258,44 @@ def main():
         target_founders[L] = fa if n_a <= n_b else fb
     target_slots = np.array([founder_slot(projector, f) for f in target_founders])
 
-    # stage 1: magnitude sweep, every locus
+    # stage 1: build the candidate pool
     sweep_idx = rng.choice(len(sample_names), cfg.n_sweep_genotypes, replace=False)
-    print(f"\nStage 1: magnitude sweep over {n_loci:,} loci "
-         f"x {cfg.n_sweep_genotypes} genotypes...")
-    magnitudes, _ = sweep_contributions(
-        snp_encoder, unet, projector, snp_matrix, sweep_idx, target_slots,
-        cfg.timestep, latent_shape, device, cfg.seed, cfg.layer,
-        cfg.locus_chunk, cfg.batch_size)
+    if cfg.pool_from_proxy:
+        # The measured sweep below is the expensive part of this script - a
+        # genome-wide UNet pass that runs for hours. It exists only to decide
+        # which loci enter the pool, and the linear influence proxy already
+        # ranks loci well enough for that job: rank_snp_contributions.py's own
+        # note is that the proxy is a good shortlist generator but not a
+        # trustworthy final ranking, and shortlisting is exactly what this is.
+        #
+        # The spacing matters more than the ranking here. Influence scores vary
+        # smoothly along a linked haplotype block, so an unspaced top-N is one
+        # genomic region repeated; spreading the pool out is what makes the
+        # diversity selection downstream have genuinely different things to
+        # choose between.
+        scores, _ = locus_influence_scores(projector, sensitivity)
+        order = np.argsort(scores)[::-1]
+        pool, magnitudes = [], scores
+        for L in order:
+            if all(abs(int(L) - s) >= cfg.pool_spacing for s in pool):
+                pool.append(int(L))
+            if len(pool) == cfg.n_pool:
+                break
+        pool_order = np.array(pool)
+        print(f"\nStage 1 skipped (pool_from_proxy): candidate pool is the top "
+              f"{len(pool_order)} loci by influence score, kept at least "
+              f"{cfg.pool_spacing} loci apart")
+    else:
+        print(f"\nStage 1: magnitude sweep over {n_loci:,} loci "
+             f"x {cfg.n_sweep_genotypes} genotypes...")
+        magnitudes, _ = sweep_contributions(
+            snp_encoder, unet, projector, snp_matrix, sweep_idx, target_slots,
+            cfg.timestep, latent_shape, device, cfg.seed, cfg.layer,
+            cfg.locus_chunk, cfg.batch_size)
 
-    pool_order = np.argsort(magnitudes)[::-1][:cfg.n_pool]
-    print(f"  candidate pool: top {len(pool_order)} loci by magnitude "
-         f"(range {magnitudes[pool_order[-1]]:.3e} - {magnitudes[pool_order[0]]:.3e})")
+        pool_order = np.argsort(magnitudes)[::-1][:cfg.n_pool]
+        print(f"  candidate pool: top {len(pool_order)} loci by magnitude "
+             f"(range {magnitudes[pool_order[-1]]:.3e} - {magnitudes[pool_order[0]]:.3e})")
 
     # stage 2: spatial signature for the candidate pool
     sig_idx = rng.choice(len(sample_names), cfg.n_signature_genotypes, replace=False)

@@ -75,6 +75,11 @@ def infer_unet_config(state_dict):
         d_attention = int(state_dict[wq_key].shape[0])
         snp_embed_dim = int(state_dict[wq_key.replace('W_Q', 'W_K')].shape[1])
 
+    # Each level's width is the output channel count of its first residual block.
+    channel_mult = tuple(
+        int(state_dict[f'down_blocks.{i}.res_blocks.0.conv1.weight'].shape[0]) // base_channels
+        for i in range(num_down))
+
     return {
         'latent_channels': latent_channels,
         'base_channels': base_channels,
@@ -82,6 +87,7 @@ def infer_unet_config(state_dict):
         'd_attention': d_attention,
         'num_res_blocks': num_res_blocks,
         'attention_resolutions': attention_resolutions,
+        'channel_mult': channel_mult,
     }
 
 
@@ -180,14 +186,7 @@ def load_model(checkpoint_path, snp_matrix, device, pca_cache=None):
         snp_encoder.load_state_dict(ckpt['snp_encoder_state_dict'])
         snp_encoder.to(device).eval()
 
-    unet = DenoisingUNet(
-        latent_channels=unet_cfg['latent_channels'],
-        base_channels=unet_cfg['base_channels'],
-        snp_embed_dim=unet_cfg['snp_embed_dim'],
-        d_attention=unet_cfg['d_attention'],
-        num_res_blocks=unet_cfg['num_res_blocks'],
-        attention_resolutions=unet_cfg['attention_resolutions'],
-    )
+    unet = DenoisingUNet(**unet_cfg)
     unet.load_state_dict(ckpt['unet_state_dict'])
     unet.to(device).eval()
 
@@ -419,14 +418,7 @@ def run_untrained_null(unet_cfg, snp_encoder, snp_batch, groups, batch_index,
     # null - a positive correlation on its own proves nothing.
     import copy
 
-    null_unet = DenoisingUNet(
-        latent_channels=unet_cfg['latent_channels'],
-        base_channels=unet_cfg['base_channels'],
-        snp_embed_dim=unet_cfg['snp_embed_dim'],
-        d_attention=unet_cfg['d_attention'],
-        num_res_blocks=unet_cfg['num_res_blocks'],
-        attention_resolutions=unet_cfg['attention_resolutions'],
-    ).to(device).eval()
+    null_unet = DenoisingUNet(**unet_cfg).to(device).eval()
 
     # Re-initialise the encoder too, but keep the fitted PCA so the input
     # representation is identical and only the learned weights differ.

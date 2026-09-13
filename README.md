@@ -104,9 +104,28 @@ in the weights folder.
 python code/latent_diffusion/training/train_onehot.py
 ```
 
-Weights to `models/diffusion_onehot/`, preview images and loss history to
-`results/training/diffusion_onehot/`. This needs a trained LiteVAE, which it
-loads frozen and never updates.
+The UNet and SNP encoder train together from scratch. Weights to
+`models/diffusion_onehot_<size>/`, preview images and loss history to
+`results/training/diffusion_onehot_<size>/`. This needs a trained LiteVAE,
+which it loads frozen and never updates.
+
+`model_size` in the config picks `small` (2.7M UNet), `medium` (8.8M, the
+default) or `large` (29M). The original model in `models/diffusion_onehot/`
+was 209M parameters and memorised its ~700 training images, so these are
+sized for the data instead. To train on Hellbender, one size per GPU:
+
+```bash
+uv sync
+mkdir -p results/training/slurm
+sbatch code/latent_diffusion/training/train_onehot_hellbender.sbatch
+```
+
+Every epoch prints a *genotype gain*: how much worse the model denoises when
+handed the wrong genotype. Held-out gain above zero means it learned something
+about genotypes that carries over to ones it never saw; a trained gain far
+above the held-out one means it is recalling training images instead. Pick the
+size with the best held-out gain and validation loss, then point
+`DIFFUSION_ONEHOT_MODEL` in `code/paths.py` at its `_best.pt`.
 
 `training/train.py` is the older version that fed SNP founder codes to the
 network as plain numbers 1-8. That treats founder 8 as "eight times founder 1",
@@ -199,6 +218,7 @@ producer first:
 
 | Script | Question it answers |
 |---|---|
+| `snp_output_contribution.py` | Where in the final 256x256 image does one SNP change the picture, and which tissue does it act on? |
 | `analyze_snp_attention.py` | Which SNP tokens does the UNet attend to, and where? |
 | `rank_snp_contributions.py` | Which individual SNPs change the image most, swept genome-wide |
 | `select_diverse_snp_maps.py` | Which SNPs have the most *different* spatial effects, not just the strongest |

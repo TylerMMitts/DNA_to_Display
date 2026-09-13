@@ -267,7 +267,8 @@ class DenoisingUNet(nn.Module):
                  d_attention=512,            # Cross-attention dimension
                  num_res_blocks=2,           # Residual blocks per stage
                  attention_resolutions=[1, 2, 4],   # Where to put attention
-                 store_attention=True): 
+                 store_attention=True,
+                 channel_mult=(1, 2, 4, 8)):        # Width of each level, times base_channels
         
         super().__init__()
 
@@ -290,8 +291,11 @@ class DenoisingUNet(nn.Module):
         self.init_conv = nn.Conv2d(latent_channels, base_channels, kernel_size=3, padding=1)
         
         # Down path
+        # The default (1, 2, 4, 8) is the original 209M-parameter layout, kept so
+        # existing checkpoints still load. Four levels are expected by the
+        # analysis scripts, which read attention from 'up_2' as the 16x16 layer.
         self.down_blocks = nn.ModuleList()
-        channels = [base_channels, base_channels*2, base_channels*4, base_channels*8]
+        channels = [base_channels * m for m in channel_mult]
         
         for i, out_ch in enumerate(channels):
             # Determine if this block should have cross-attention or self-attention based on the resolution
@@ -315,7 +319,7 @@ class DenoisingUNet(nn.Module):
         # This is at the point of the network where information is most abstract
         # so adding parameters here allows the network to learn complex relationships 
         # between the latent representation and the kinship embedding on a global scale
-        bottleneck_ch = base_channels * 8
+        bottleneck_ch = channels[-1]
         self.bottleneck = nn.ModuleList([
             ResidualBlock(bottleneck_ch, bottleneck_ch, 512),
             CrossAttentionBlock(bottleneck_ch, snp_embed_dim, d_attention, store_attention=store_attention),

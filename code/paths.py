@@ -58,6 +58,28 @@ MODEL_NAMES = {
 }
 
 
+# Picks the fastest backend actually present on this machine: CUDA if there is
+# an NVIDIA GPU, Apple's Metal (MPS) on Apple silicon, CPU otherwise. Every
+# script asks here rather than testing torch.cuda.is_available() itself, so a
+# machine with no CUDA still uses its GPU instead of silently dropping to CPU.
+#
+# Set DNA_DEVICE to force one ('cpu', 'mps', 'cuda') when a backend is present
+# but unwanted - an MPS operator gap, or comparing against a CPU baseline.
+def pick_device():
+    import os
+    import torch
+
+    forced = os.environ.get('DNA_DEVICE')
+    if forced:
+        return forced
+
+    if torch.cuda.is_available():
+        return 'cuda'
+    if getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available():
+        return 'mps'
+    return 'cpu'
+
+
 # Puts code/ on the import path so a script can be launched directly by file
 # path and still resolve latent_diffusion, litevae and feature_segmentation.
 def add_code_to_path():

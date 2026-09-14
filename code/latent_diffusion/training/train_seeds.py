@@ -458,7 +458,9 @@ def main():
     # The scheduler holds plain tensors, not module buffers, so .to(device) on
     # the model does not move them; indexing them with a device-side timestep
     # would fail otherwise.
-    scheduler.to(device)
+    scheduler.betas = scheduler.betas.to(device)
+    scheduler.alphas = scheduler.alphas.to(device)
+    scheduler.alpha_bars = scheduler.alpha_bars.to(device)
 
     ldm = LatentDiffusionModel(
         litevae_encoder=litevae_encoder, litevae_decoder=litevae_decoder,

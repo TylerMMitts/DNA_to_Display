@@ -39,7 +39,7 @@ from latent_diffusion.models.unet import DenoisingUNet
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
 from latent_diffusion.generation.generate_from_dataset import (
-    generate_batch, load_original, save_comparison,
+    generate_batch, load_original, save_multi_comparison,
 )
 
 # Every checkpoint this script writes is prefixed with this, so a stray .pt file
@@ -239,6 +239,10 @@ def main():
         # Saves sample images for preview during training
         save_previews = True
         n_preview_genotypes = 3
+        # Noise seeds per genotype. One sample cannot show whether a change
+        # between epochs is the model or that particular noise draw, so each
+        # preview generates several from the same genotype.
+        n_preview_seeds = 3
         preview_sampling_steps = 20
         preview_latent_size = 32
 
@@ -535,23 +539,35 @@ def main():
     preview_dir = results_dir / 'previews'
     preview_latent_shape = (cfg.latent_channels, cfg.preview_latent_size,
                             cfg.preview_latent_size)
-    # One fixed seed per genotype, reused at every preview call rather than drawn fresh each epoch
-    preview_seeds = [cfg.seed + i for i in range(len(preview_samples))]
+    # A fixed set of seeds per genotype, reused at every preview call rather than
+    # drawn fresh each epoch, so what changes between previews is the model and
+    # not the noise it started from.
+    preview_seeds = [[cfg.seed + 100 * i + j for j in range(cfg.n_preview_seeds)]
+                     for i in range(len(preview_samples))]
 
     def save_previews(epoch_num):
         ldm.eval()
         preview_dir.mkdir(parents=True, exist_ok=True)
-        snp_batch = torch.tensor(np.stack([s['projected'] for s in preview_samples]),
-                                 dtype=torch.float32, device=device)
+        # Each genotype repeated once per seed, so one sampling run covers every
+        # panel of every preview rather than one run per genotype.
+        snp_batch = torch.tensor(
+            np.stack([s['projected'] for s in preview_samples
+                      for _ in range(cfg.n_preview_seeds)]),
+            dtype=torch.float32, device=device)
+        flat_seeds = [s for seeds in preview_seeds for s in seeds]
         generated = generate_batch(snp_encoder, unet, scheduler, litevae_decoder,
-                                   snp_batch, preview_seeds, device,
+                                   snp_batch, flat_seeds, device,
                                    preview_latent_shape, cfg.preview_sampling_steps)
-        for s, gen_img in zip(preview_samples, generated):
+        for i, s in enumerate(preview_samples):
             original = load_original(s['image_path'], cfg.image_size)
-            save_comparison(original, gen_img, s['genotype'],
-                            preview_dir / f"{s['genotype']}_epoch{epoch_num:04d}.png")
+            start = i * cfg.n_preview_seeds
+            save_multi_comparison(
+                original, generated[start:start + cfg.n_preview_seeds],
+                s['genotype'], preview_seeds[i],
+                preview_dir / f"{s['genotype']}_epoch{epoch_num:04d}.png")
         set_train_mode()
-        print(f"  wrote {len(preview_samples)} preview images to {preview_dir}")
+        print(f"  wrote {len(preview_samples)} preview images "
+              f"({cfg.n_preview_seeds} seeds each) to {preview_dir}")
 
     # Denoising loss with each image's own genotype and with another genotype
     # from the same split, on identical timesteps and noise every call.

@@ -77,6 +77,38 @@ def save_comparison(original_rgb, generated_rgb, label, save_path, divider=4):
     img.save(save_path)
 
 
+# The real image first, then one generated image per noise seed, in a row.
+#
+# Used by the training previews. One sample per genotype cannot show whether a
+# difference between epochs is the model changing or just that noise draw, so
+# the previews generate several and put them side by side: what the seeds have
+# in common is the genotype, what differs between them is the noise.
+def save_multi_comparison(original_rgb, generated_list, label, seeds, save_path,
+                          divider=4):
+    h, w = original_rgb.shape[:2]
+    panels = [original_rgb]
+    for gen in generated_list:
+        if gen.shape[:2] != (h, w):
+            gen = np.array(Image.fromarray(gen).resize((w, h), Image.LANCZOS))
+        panels.append(gen)
+
+    total_w = w * len(panels) + divider * (len(panels) - 1)
+    canvas = np.zeros((h, total_w, 3), dtype=np.uint8)
+    canvas[:, :] = 40                                  # divider colour showing through
+    for i, panel in enumerate(panels):
+        x = i * (w + divider)
+        canvas[:, x:x + w] = panel
+
+    img = Image.fromarray(canvas)
+    draw = ImageDraw.Draw(img)
+    captions = [f'{label}  (original)'] + [f'seed {s}' for s in seeds]
+    for i, text in enumerate(captions):
+        x = i * (w + divider) + 4
+        draw.rectangle([x - 2, 2, x + 4 + 7 * len(text), 16], fill=(0, 0, 0))
+        draw.text((x, 4), text, fill=(255, 255, 255))
+    img.save(save_path)
+
+
 def main():
     # Edit these values, then run:
     #     python code/latent_diffusion/generation/generate_from_dataset.py

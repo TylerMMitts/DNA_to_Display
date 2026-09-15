@@ -509,8 +509,18 @@ def main():
     if resume_ckpt is not None and history_path.exists():
         # History is written every epoch but checkpoints only every save_every,
         # so a job killed in between leaves rows the resumed run will redo.
-        history = [r for r in pd.read_csv(history_path).to_dict('records')
-                   if r['epoch'] <= start_epoch]
+        #
+        # A run killed partway through writing this file - or one that ran out of
+        # disk while writing it - leaves a file that exists but has no header.
+        # The history is only the loss curve, so losing it is not worth losing
+        # the run for; say so and carry on with an empty one.
+        try:
+            history = [r for r in pd.read_csv(history_path).to_dict('records')
+                       if r['epoch'] <= start_epoch]
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+            print(f"  {history_path.name} is unreadable ({type(exc).__name__}) - "
+                  "starting a fresh loss curve, training is unaffected")
+            history = []
 
     if resume_ckpt is not None:
         print(f"Resuming at epoch {start_epoch + 1}/{cfg.num_epochs}, "
@@ -666,7 +676,12 @@ def main():
             best_val = val_loss
             checkpoint(best_path, 'best validation loss')
 
-        pd.DataFrame(history).to_csv(history_path, index=False)
+        # Written to a temporary file and moved into place, so an interrupted
+        # or out-of-disk write cannot leave a half-written file behind. The
+        # move is atomic on POSIX.
+        tmp_path = history_path.with_suffix('.csv.tmp')
+        pd.DataFrame(history).to_csv(tmp_path, index=False)
+        os.replace(tmp_path, history_path)
 
     with open(results_dir / 'run_summary.json', 'w') as f:
         json.dump({

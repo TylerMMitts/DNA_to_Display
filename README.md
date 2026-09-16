@@ -316,6 +316,69 @@ producer first:
 check on whether genotype actually predicts phenotype here, rather than the
 model producing plausible roots that ignore their conditioning.
 
+## Analysing a trained model
+
+Every analysis above was first run on the original one-hot model. To run all of
+them on another root diffusion model, set `checkpoint` in the config of
+[code/evaluate_diffusion_model.py](code/evaluate_diffusion_model.py) and run:
+
+```bash
+python code/evaluate_diffusion_model.py
+```
+
+Everything lands in `results/model_analysis/<checkpoint name>/`, one subfolder
+per analysis, with `model_info.json` recording what was analysed and
+`pipeline_log.csv` recording how each step went. A `_best.pt` checkpoint gets
+its epoch added to the folder name, because that file is overwritten as
+training improves.
+
+| Step | Script | What it answers |
+|---|---|---|
+| `memorization` | `analysis/analyze_genotype_memorization.py` | Does the right genotype help on held-out plants, or only on trained ones? |
+| `snp_encoder` | `validation/test_snp_encoder.py` | Does this model's SNP encoder keep genotypes apart? |
+| `genetic_fidelity` | `evaluation/genetic_fidelity_test.py` | Do generated traits track real ones, measured by the segmenter? |
+| `train_vs_test` | `evaluation/train_vs_test_accuracy.py` | The same, split by trained and held-out genotypes |
+| `latent_comparison` | `evaluation/latent_comparison.py` | How far generated latents sit from real ones |
+| `attention` | `analysis/analyze_snp_attention.py` | Which SNP tokens are attended to, and where |
+| `genotype_contribution` | `analysis/analyze_genotype_contribution.py` | How much the genotype moves the output |
+| `snp_spatial_contribution` | `analysis/analyze_snp_spatial_contribution.py` | Where named loci act |
+| `snp_ranking` | `analysis/rank_snp_contributions.py` | Strongest SNPs, genome-wide |
+| `snp_diverse_maps` | `analysis/select_diverse_snp_maps.py` | SNPs with the most different spatial effects |
+| `snp_output_contribution` | `analysis/snp_output_contribution.py` | Those SNPs' effects in the final image, by tissue |
+| `parent_archetypes` | `generation/generate_parent_archetypes.py` | The eight founders as this model draws them |
+| `founder_strategies` | `generation/founder_archetype_strategies.py` | Ways of building a founder genotype, compared |
+| `gallery` (off) | `generation/generate_from_dataset.py` | Real and generated side by side, for browsing |
+
+Comment a step out of `steps` to skip it, and use `step_settings` to change any
+one script's settings for a quicker pass, for example
+`{'genetic_fidelity': {'max_images': 40}}`. Every setting is checked against its
+script before anything runs, so a misspelt name fails in seconds rather than
+hours into a job. Each step runs in its own process, so a crash is logged and
+the remaining steps carry on; a step that reads a failed step's output is
+skipped.
+
+`train_vs_test` also reports the LiteVAE ceiling from
+`results/reconstruction_fidelity/` (`evaluation/reconstruction_fidelity_test.py`).
+That measures the autoencoder alone, so it is run once and shared by every model
+rather than repeated per model. Without it the step still runs and skips that
+section.
+
+On Hellbender, after editing `checkpoint`:
+
+```bash
+mkdir -p results/model_analysis/slurm
+sbatch code/evaluate_diffusion_model_hellbender.sbatch
+```
+
+This is for root models only. The seed models use a different locus set and
+autoencoder, which these scripts do not load. Two analyses are left out on
+purpose: `test_conditioning_strength.py` and `compare_genotype_contributions.py`
+compare one-hot against numeric encoding, so they are about two models at once
+rather than one.
+
+Each script also still runs on its own exactly as before; the pipeline only
+redirects its checkpoint, output folder and caches.
+
 ## Notes on running this
 
 Scripts pick CUDA automatically when it is available and fall back to CPU.

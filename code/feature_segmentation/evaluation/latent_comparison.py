@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     CROPPED_IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL, RESULTS_DIR,
     resolve_input, resolve_output,
+    apply_overrides,
 )
 
 from feature_segmentation.evaluation.latent_average_test import (
@@ -285,7 +286,7 @@ def save_summary_figure(df, same_d, diff_d, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/feature_segmentation/evaluation/latent_comparison.py
     class cfg:
@@ -309,6 +310,8 @@ def main():
         imgsz = 256
         seed = 0
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    apply_overrides(cfg, overrides)
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)

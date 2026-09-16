@@ -24,6 +24,7 @@ from paths import (
     CROPPED_IMAGES_DIR, DIFFUSION_ONEHOT_DIR, IMAGE_METADATA, LITEVAE_MODEL,
     RESULTS_DIR, SEGMENTATION_MODEL, SNP_PARQUET, find_latest_checkpoint,
     resolve_input, resolve_output,
+    apply_overrides,
 )
 
 from ultralytics import YOLO
@@ -206,11 +207,15 @@ def save_summary_figure(stats, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
 
     class cfg:
         # find_latest_checkpoint picks the highest numbered checkpoint here.
         checkpoint_dir = DIFFUSION_ONEHOT_DIR
+        # A specific checkpoint file, which wins over checkpoint_dir when set.
+        # The newest numbered epoch is not always the one wanted - a _best.pt
+        # file, say - and picking it silently would analyse a different model.
+        checkpoint = None
         litevae_checkpoint = LITEVAE_MODEL
         seg_weights = SEGMENTATION_MODEL
         snp_parquet = SNP_PARQUET
@@ -238,6 +243,8 @@ def main():
         connectivity = 2
         n_permutations = 1000
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    apply_overrides(cfg, overrides)
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)
@@ -278,8 +285,11 @@ def main():
     seg = YOLO(str(seg_path))
     print(f"Segmentation weights: {seg_path}")
 
-    checkpoint_path = find_latest_checkpoint(
-        resolve_input(cfg.checkpoint_dir, 'checkpoint directory'))
+    if cfg.checkpoint:
+        checkpoint_path = resolve_input(cfg.checkpoint, 'diffusion checkpoint')
+    else:
+        checkpoint_path = find_latest_checkpoint(
+            resolve_input(cfg.checkpoint_dir, 'checkpoint directory'))
     snp_encoder, unet, unet_cfg = load_model(
         checkpoint_path, snp_matrix, device, pca_cache=str(resolve_output(cfg.pca_cache)))
     latent_shape = (unet_cfg['latent_channels'], cfg.latent_size, cfg.latent_size)

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     DIFFUSION_ONEHOT_MODEL, KINSHIP_MATRIX, LITEVAE_MODEL, RESULTS_DIR,
     SNP_PARQUET, resolve_input, resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import SNPEncoder, load_snp_data_from_parquet
@@ -451,7 +452,7 @@ def spearman(x, y):
     return float(np.corrcoef(rx, ry)[0, 1])
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/analysis/analyze_snp_attention.py
     #
@@ -498,6 +499,8 @@ def main():
         litevae_checkpoint = LITEVAE_MODEL
         sampling_steps = 50
         overlay_layer = 'up_2'  # layer whose deviation map is overlaid
+
+    apply_overrides(cfg, overrides)
 
     device = torch.device(cfg.device)
     out_root = resolve_output(cfg.output_dir)

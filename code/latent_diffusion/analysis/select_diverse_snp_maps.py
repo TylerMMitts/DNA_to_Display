@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SNP_PARQUET, resolve_input,
     resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -161,7 +162,7 @@ def save_distance_comparison(diverse_sigs, magnitude_top_sigs, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/analysis/select_diverse_snp_maps.py
     class cfg:
@@ -204,6 +205,8 @@ def main():
         latent_size = 32
         seed = 0
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    apply_overrides(cfg, overrides)
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)
@@ -274,7 +277,9 @@ def main():
         # diversity selection downstream have genuinely different things to
         # choose between.
         scores, _ = locus_influence_scores(projector, sensitivity)
-        order = np.argsort(scores)[::-1]
+        # Ranked within max_loci only, like the sweep. target_slots covers just
+        # those loci, so a pool drawn from the whole genome indexed past its end.
+        order = np.argsort(scores[:n_loci])[::-1]
         pool, magnitudes = [], scores
         for L in order:
             if all(abs(int(L) - s) >= cfg.pool_spacing for s in pool):
@@ -282,6 +287,13 @@ def main():
             if len(pool) == cfg.n_pool:
                 break
         pool_order = np.array(pool)
+        # A small max_loci with a wide spacing can leave fewer loci than are to
+        # be selected, which otherwise fails later as an index error.
+        if len(pool_order) < cfg.top_n:
+            raise SystemExit(
+                f"only {len(pool_order)} loci fit {n_loci} loci at pool_spacing "
+                f"{cfg.pool_spacing}, fewer than top_n {cfg.top_n} - raise max_loci "
+                "or lower pool_spacing")
         print(f"\nStage 1 skipped (pool_from_proxy): candidate pool is the top "
               f"{len(pool_order)} loci by influence score, kept at least "
               f"{cfg.pool_spacing} loci apart")

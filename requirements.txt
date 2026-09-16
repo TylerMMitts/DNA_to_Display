@@ -1,3 +1,25 @@
+# Needs Python 3.9 or newer. Check before installing anything:
+#
+#     python -c "import sys; print(sys.version)"
+#
+# This is not a preference. The code calls torch.load(..., weights_only=...) in
+# 25 places, which needs torch 1.13 or newer, and the last torch ever built for
+# Python 3.6 is 1.10. On an older interpreter pip resolves numpy and pandas down
+# to versions from 2020 and then fails on torch, or worse, installs a torch that
+# crashes the first time a checkpoint is loaded.
+#
+# On a cluster, load a module or create a conda environment rather than
+# installing into whatever python happens to be on PATH:
+#
+#     module spider python          # see what the cluster offers
+#     module load miniconda3 && conda create -n dna python=3.11 && conda activate dna
+#
+# Stops the install on an old interpreter with a message that says why, instead
+# of a confusing "no matching distribution for numpy" twenty lines down. The
+# marker means this line does not exist on Python 3.9 or newer; on anything
+# older pip fails looking for a package by this name.
+dna-to-display-requires-python-3-9-or-newer ; python_version < "3.9"
+
 # Core numerics and data handling.
 numpy>=1.21.0
 pandas>=1.3.0
@@ -8,8 +30,13 @@ pyarrow>=10.0.0              # pandas reads the SNP matrix from .parquet
 # Deep learning. Install the torch build that matches your CUDA version from
 # https://pytorch.org - the plain wheel below is CPU-only, which works but makes
 # training and full-dataset generation very slow.
-torch>=1.9.0
-torchvision>=0.10.0
+#
+# 2.0 is the floor rather than 1.13 because the device helpers also use
+# torch.mps for Apple silicon, which arrived in 2.0. Only the checkpoint loading
+# matters on a CUDA cluster, but one floor across every machine is simpler than
+# a matrix of which file needs what.
+torch>=2.0.0
+torchvision>=0.15.0
 
 # Image handling and the models built on it.
 Pillow>=8.0.0

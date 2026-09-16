@@ -21,6 +21,7 @@ from paths import (
     CROPPED_IMAGES_DIR, DIFFUSION_NUMERIC_DIR, DIFFUSION_ONEHOT_DIR,
     IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL, RESULTS_DIR, SNP_PARQUET,
     find_latest_checkpoint, resolve_input, resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -109,11 +110,15 @@ def save_multi_comparison(original_rgb, generated_list, label, seeds, save_path,
     img.save(save_path)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/generation/generate_from_dataset.py
     class cfg:
         checkpoint_dir = DIFFUSION_ONEHOT_DIR    # newest checkpoint in here is used
+        # A specific checkpoint file, which wins over checkpoint_dir when set.
+        # The newest numbered epoch is not always the one wanted - a _best.pt
+        # file, say - and picking it silently would analyse a different model.
+        checkpoint = None
         litevae_checkpoint = LITEVAE_MODEL
         snp_parquet = SNP_PARQUET
         metadata_path = IMAGE_METADATA
@@ -145,6 +150,8 @@ def main():
         latent_size = 32
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    apply_overrides(cfg, overrides)
+
     device = torch.device(cfg.device)
     out_root = resolve_output(cfg.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -164,8 +171,11 @@ def main():
     name_to_row = {n: i for i, n in enumerate(sample_names)}
 
     # model
-    checkpoint_dir = resolve_input(cfg.checkpoint_dir, 'checkpoint directory')
-    checkpoint_path = find_latest_checkpoint(checkpoint_dir)
+    if cfg.checkpoint:
+        checkpoint_path = resolve_input(cfg.checkpoint, 'diffusion checkpoint')
+    else:
+        checkpoint_path = find_latest_checkpoint(
+            resolve_input(cfg.checkpoint_dir, 'checkpoint directory'))
     snp_encoder, unet, unet_cfg = load_model(
         checkpoint_path, snp_matrix, device, pca_cache=str(resolve_output(cfg.pca_cache)))
     latent_shape = (unet_cfg['latent_channels'], cfg.latent_size, cfg.latent_size)

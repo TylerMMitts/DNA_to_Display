@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     DIFFUSION_ONEHOT_DIR, LITEVAE_MODEL, RESULTS_DIR, SNP_PARQUET,
     find_latest_checkpoint, resolve_input, resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -237,11 +238,15 @@ def save_separation_figure(summary, real_reference, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/generation/founder_archetype_strategies.py
     class cfg:
         checkpoint_dir = DIFFUSION_ONEHOT_DIR
+        # A specific checkpoint file, which wins over checkpoint_dir when set.
+        # The newest numbered epoch is not always the one wanted - a _best.pt
+        # file, say - and picking it silently would analyse a different model.
+        checkpoint = None
         litevae_checkpoint = LITEVAE_MODEL
         snp_parquet = SNP_PARQUET
         pca_cache = RESULTS_DIR / 'attention_analysis' / 'pca.pkl'   # legacy path only
@@ -283,6 +288,8 @@ def main():
         latent_size = 32
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    apply_overrides(cfg, overrides)
+
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)
     (out / 'images').mkdir(parents=True, exist_ok=True)
@@ -297,8 +304,11 @@ def main():
         founders = sorted(int(v) for v in np.unique(snp_matrix) if v > 0)
     print(f"Founders: {founders}")
 
-    ckpt_path = find_latest_checkpoint(
-        resolve_input(cfg.checkpoint_dir, 'checkpoint directory'))
+    if cfg.checkpoint:
+        ckpt_path = resolve_input(cfg.checkpoint, 'diffusion checkpoint')
+    else:
+        ckpt_path = find_latest_checkpoint(
+            resolve_input(cfg.checkpoint_dir, 'checkpoint directory'))
     snp_encoder, unet, unet_cfg = load_model(
         ckpt_path, snp_matrix, device, pca_cache=str(resolve_output(cfg.pca_cache)))
     projector = snp_encoder.pca

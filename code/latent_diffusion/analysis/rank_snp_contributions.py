@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SNP_PARQUET, resolve_input,
     resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -204,7 +205,7 @@ def save_ranking_figure(ranking, top_n, proxy_scores, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/analysis/rank_snp_contributions.py
     class cfg:
@@ -244,6 +245,8 @@ def main():
         latent_size = 32
         seed = 0
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    apply_overrides(cfg, overrides)
 
     device = torch.device(cfg.device)
     out = resolve_output(cfg.output_dir)

@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SNP_PARQUET, resolve_input,
     resolve_output,
+    apply_overrides,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
@@ -270,7 +271,7 @@ def save_split_figure(rows, save_path):
     plt.close(fig)
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/feature_segmentation/evaluation/train_vs_test_accuracy.py
     class cfg:
@@ -302,6 +303,8 @@ def main():
 
         n_permutations = 1000
         seed = 0
+
+    apply_overrides(cfg, overrides)
 
     out = resolve_output(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)

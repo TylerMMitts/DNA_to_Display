@@ -74,6 +74,12 @@ DIFFUSION_NUMERIC_MODEL = DIFFUSION_NUMERIC_DIR / 'diffusion_numeric_epoch_500.p
 # curves are results, so they land here instead of beside the weights.
 TRAINING_RESULTS_DIR = RESULTS_DIR / 'training'
 
+# Every analysis evaluate_diffusion_model.py runs for one checkpoint lands in a
+# folder named after that checkpoint, so two models never share an output folder
+# or, more importantly, a cache - several analyses cache results that are only
+# valid for the model that produced them.
+MODEL_ANALYSIS_DIR = RESULTS_DIR / 'model_analysis'
+
 # The stem used for checkpoint filenames, keyed by the folder holding them.
 # Kept in one place so a rename only has to happen here.
 MODEL_NAMES = {
@@ -83,6 +89,22 @@ MODEL_NAMES = {
     DIFFUSION_ONEHOT_DIR: 'diffusion_onehot',
     DIFFUSION_NUMERIC_DIR: 'diffusion_numeric',
 }
+
+
+# Replaces values in a script's cfg block, so one script can drive another
+# without the second growing command-line arguments.
+#
+# A name that is not already a setting is an error rather than a new attribute.
+# Otherwise a misspelt override - output_dr for output_dir - would be accepted,
+# ignored, and leave the script writing to its default folder, which is exactly
+# the silent mix-up this exists to prevent. Called with nothing, it does nothing,
+# so a script run on its own behaves as it always has.
+def apply_overrides(cfg, overrides):
+    for name, value in (overrides or {}).items():
+        if not hasattr(cfg, name):
+            raise SystemExit(f"unknown setting {name!r} - not in this script's cfg block")
+        setattr(cfg, name, value)
+    return cfg
 
 
 # Picks the fastest backend actually present on this machine: CUDA if there is

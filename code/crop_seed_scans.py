@@ -93,7 +93,15 @@ def main():
 
         # A pixel counts as ink below this grey level, on 0-255. The plates are
         # rendered on pure white, so anything short of about 250 is safe.
+        # Measured: moving this between 200 and 250 changes a bar length by at
+        # most 2 px out of ~320, so the anti-aliased edges do not matter here.
         ink_threshold = 245
+
+        # What one scale bar means in millimetres. The scans are 1200 dpi, which
+        # is 1200 / 2.54 = 472.4 px/cm, and the bar is drawn 236 px long there,
+        # so it marks half a centimetre. Everything absolute follows from this
+        # one number; the relative sizes do not depend on it at all.
+        bar_mm = 5.0
 
         # Stop before writing anything if any plate fails the layout check,
         # rather than producing a folder where some crops are wrong.
@@ -151,6 +159,11 @@ def main():
             # height, so these are the only size comparisons that mean anything.
             'kernel_height_per_bar': (kernel[1] - kernel[0] + 1) / bar_px,
             'kernel_width_per_bar': int(columns.sum()) / bar_px,
+            # The same sizes in millimetres, once the bar is given a length.
+            'mm_per_bar': cfg.bar_mm,
+            'plate_px_per_mm': bar_px / cfg.bar_mm,
+            'kernel_height_mm': (kernel[1] - kernel[0] + 1) / bar_px * cfg.bar_mm,
+            'kernel_width_mm': int(columns.sum()) / bar_px * cfg.bar_mm,
         })
 
     if problems:
@@ -180,11 +193,14 @@ def main():
     print(f"Wrote {meta_path.name} to {meta_path.parent}\n")
 
     print(f"Scale bar:     {frame.scale_bar_px.min()} to {frame.scale_bar_px.max()} px "
-          f"({frame.scale_bar_px.nunique()} distinct)")
+          f"({frame.scale_bar_px.nunique()} distinct), taken as {cfg.bar_mm} mm")
     print(f"Kernel height: {frame.kernel_height_px.min()} to "
           f"{frame.kernel_height_px.max()} px on the plate, but "
-          f"{frame.kernel_height_per_bar.min():.2f} to "
-          f"{frame.kernel_height_per_bar.max():.2f} bar lengths in real size")
+          f"{frame.kernel_height_mm.min():.1f} to {frame.kernel_height_mm.max():.1f} mm "
+          f"in real size (median {frame.kernel_height_mm.median():.1f})")
+    print(f"Kernel width:  {frame.kernel_width_mm.min():.1f} to "
+          f"{frame.kernel_width_mm.max():.1f} mm "
+          f"(median {frame.kernel_width_mm.median():.1f})")
     print("The second range is the real one. Resize these crops without carrying "
           "scale_bar_px\nthrough and every kernel becomes the same size.")
 

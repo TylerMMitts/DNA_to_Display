@@ -66,6 +66,12 @@ def main():
         # 238 px) inside a 256 canvas with 9 px to spare.
         px_per_bar = 97.0
 
+        # What one scale bar means in millimetres, matching crop_seed_scans.py.
+        # 1200 dpi is 472.4 px/cm and the bar is 236 px there, so it marks half
+        # a centimetre. With px_per_bar fixed above, this makes every scaled
+        # image share one resolution in px/mm.
+        bar_mm = 5.0
+
         # 256 is what LiteVAE and the diffusion model already take, so these
         # need no further resizing at training time.
         canvas = 256
@@ -129,8 +135,14 @@ def main():
             'kernel_height_px': height,
             'kernel_width_bars': width / cfg.px_per_bar,
             'kernel_height_bars': height / cfg.px_per_bar,
+            'kernel_width_mm': width / cfg.px_per_bar * cfg.bar_mm,
+            'kernel_height_mm': height / cfg.px_per_bar * cfg.bar_mm,
             'canvas_px': cfg.canvas,
             'px_per_bar': cfg.px_per_bar,
+            'mm_per_bar': cfg.bar_mm,
+            # The same for every image, which is the whole point of this step:
+            # a pixel means the same distance in all of them.
+            'px_per_mm': cfg.px_per_bar / cfg.bar_mm,
             'fill_fraction': (width * height) / (cfg.canvas ** 2),
         })
 
@@ -152,12 +164,18 @@ def main():
 
     print(f"Wrote {len(frame)} images to {out_dir}")
     print(f"Wrote {meta_out.name} to {meta_out.parent}\n")
+    print(f"Scale:         {cfg.px_per_bar / cfg.bar_mm:.1f} px per mm, the same in "
+          "every image")
     print(f"Kernel height: {frame.kernel_height_px.min()} to "
           f"{frame.kernel_height_px.max()} px "
           f"({frame.kernel_height_px.max() / frame.kernel_height_px.min():.2f}x, "
           "and that ratio is now the real size difference)")
+    print(f"               {frame.kernel_height_mm.min():.1f} to "
+          f"{frame.kernel_height_mm.max():.1f} mm, median "
+          f"{frame.kernel_height_mm.median():.1f}")
     print(f"Kernel width:  {frame.kernel_width_px.min()} to "
-          f"{frame.kernel_width_px.max()} px")
+          f"{frame.kernel_width_px.max()} px, "
+          f"{frame.kernel_width_mm.min():.1f} to {frame.kernel_width_mm.max():.1f} mm")
     print(f"Canvas fill:   {frame.fill_fraction.min():.1%} to "
           f"{frame.fill_fraction.max():.1%}")
 

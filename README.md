@@ -281,6 +281,7 @@ producer first:
 | `generate_parent_archetypes.py` | What each of the eight founder parents should look like |
 | `founder_archetype_strategies.py` | Compares ways of building a founder genotype to generate from |
 | `generate_held_out_seeds.py` | Seven generated images beside every root whose genotype the model never trained on |
+| `generate_held_out_kernels.py` | The same for seed kernels |
 
 **Understanding what the model learned** - `code/latent_diffusion/analysis/`
 
@@ -386,6 +387,72 @@ rather than one.
 
 Each script also still runs on its own exactly as before; the pipeline only
 redirects its checkpoint, output folder and caches.
+
+## Analysing a trained seed model
+
+The same idea for seed models, in its own file. Set `checkpoint` in the config
+of [code/evaluate_seed_diffusion_model.py](code/evaluate_seed_diffusion_model.py)
+to any checkpoint `train_seeds.py` wrote, then run:
+
+```bash
+python code/evaluate_seed_diffusion_model.py
+```
+
+Results land in `results/seeds/model_analysis/<checkpoint name>/`. Skipping
+finished steps, `rerun`, `step_settings` and the log all work exactly as in the
+root pipeline; both run on [code/analysis_pipeline.py](code/analysis_pipeline.py).
+Each pipeline refuses a checkpoint from the other dataset before running anything.
+
+| Step | Script | What it answers |
+|---|---|---|
+| `memorization` | `analysis/analyze_seed_memorization.py` | Does the right genotype help on held-out kernels, or only on trained ones? |
+| `kernel_traits` | `kernel_traits/kernel_trait_fidelity.py` | Do generated kernels have the size, shape and colour their genotype should give? |
+| `held_out_kernels` | `generation/generate_held_out_kernels.py` | Every held-out kernel beside seven generated kernels of its genotype |
+
+The root segmenter has nothing to find in a kernel, so `kernel_traits` measures
+kernels from their pixels. Every scaled image is one kernel on white at 19.4
+px/mm, so the kernel is everything that is not white, and:
+
+- **size and shape** come from that mask: area in mm², height, width,
+  height/width, how much of its bounding box it fills, and taper (width near
+  the tip over width near the crown)
+- **colour** comes from the pixels inside it, in CIE Lab: lightness, red-green,
+  yellow-blue, chroma, hue angle, and how much lighter the bottom is than the
+  top, since the plates draw colour as bands
+
+Each genotype is generated from four noise seeds and the mean is compared with
+its real kernel, separately for trained and held-out genotypes. The held-out
+correlation, against its shuffled-genotype chance level, is the number that
+says whether the model learned how genotype sets that trait. Real kernels are
+also passed through the seed LiteVAE and measured, as the ceiling: a trait the
+autoencoder cannot carry, generation cannot produce. *Genotype share* is how
+much of the variation between generated kernels follows genotype rather than
+noise seed.
+
+A generated image with no white border around the kernel counts as no kernel
+found rather than being measured as a canvas-sized one, and detection rates are
+reported per source.
+
+To measure only the real kernels, which needs no model:
+
+```bash
+python code/kernel_traits/measure_kernel_traits.py
+```
+
+That writes `results/seeds/kernel_traits/`, including `mask_check.png` showing
+each measured outline. Its heights and widths match `seed_scaled_metadata.csv`
+exactly for all 548 kernels.
+
+On Hellbender, after editing `checkpoint`:
+
+```bash
+mkdir -p results/seeds/model_analysis/slurm
+sbatch code/evaluate_seed_diffusion_model_hellbender.sbatch
+```
+
+The root SNP attention and contribution analyses are not part of this yet: they
+read the root SNP table format, and the seed table names its founders rather
+than numbering them.
 
 ## Notes on running this
 

@@ -9,6 +9,8 @@
 #
 # Each analysis is still its own script and still runs on its own. This file only
 # redirects each one's checkpoint and output folder, and runs them in order.
+# Rerunning for the same model skips every step whose folder already exists, so
+# a newly added step is the only one that runs.
 
 import ast
 import json
@@ -98,6 +100,11 @@ def build_steps(checkpoint, d):
         'founder_strategies': ('latent_diffusion.generation.founder_archetype_strategies', {
             'checkpoint': checkpoint, 'output_dir': d / 'founder_strategies', 'pca_cache': pca,
         }, []),
+        # Every held-out root beside seven generated images of its genotype, for
+        # judging by eye what the model does with genotypes it never trained on.
+        'held_out_seeds': ('latent_diffusion.generation.generate_held_out_seeds', {
+            'checkpoint': checkpoint, 'output_dir': d / 'held_out_seeds', 'pca_cache': pca,
+        }, []),
         # Side-by-side real and generated images for browsing. Off by default:
         # genetic_fidelity already generates an image for every real one, so
         # this repeats the slowest work in the pipeline for a gallery.
@@ -182,8 +189,19 @@ def main(overrides=None):
             'snp_output_contribution',
             'parent_archetypes',
             'founder_strategies',
+            'held_out_seeds',
             # 'gallery',
         ]
+
+        # Skip a step whose output folder already exists for this model, so
+        # rerunning after adding a step runs only that step. A step the last run
+        # logged as failed or left unfinished is run again regardless, and so is
+        # any step that reads the output of a step run this time.
+        skip_completed = True
+
+        # Steps to run again even though their folder exists, e.g. after
+        # changing one of their settings: ['genetic_fidelity'].
+        rerun = []
 
         # Extra settings for individual steps, on top of the checkpoint and
         # output redirection. Useful for a quick first pass, e.g.
@@ -229,6 +247,9 @@ def main(overrides=None):
     unknown = [s for s in cfg.step_settings if s not in all_steps]
     if unknown:
         raise SystemExit(f"step_settings names unknown step(s) {unknown}")
+    unknown = [s for s in cfg.rerun if s not in all_steps]
+    if unknown:
+        raise SystemExit(f"rerun names unknown step(s) {unknown}")
 
     plan = {}
     for name in cfg.steps:
@@ -247,29 +268,67 @@ def main(overrides=None):
     # step loads its own models, so this releases the GPU memory in between,
     # and a step that crashes cannot take the rest of the run down with it.
     context = multiprocessing.get_context('spawn')
-    log, failed = [], set()
+    log_path = model_dir / 'pipeline_log.csv'
+
+    # The log carries over between runs, one row per step, so a step that was
+    # not part of this run keeps the row from the run that did it.
+    log = {}
+    if log_path.exists():
+        for row in pd.read_csv(log_path, keep_default_na=False).to_dict('records'):
+            log[row['step']] = row
+
+    def write_log():
+        order = [s for s in all_steps if s in log]
+        pd.DataFrame([log[s] for s in order]).to_csv(log_path, index=False)
+
+    failed, ran = set(), set()
 
     for i, (name, (module, overrides, needs)) in enumerate(plan.items(), start=1):
         header = f"[{i}/{len(plan)}] {name}"
         broken = [n for n in needs if n in failed]
         if broken:
             print(f"{header}: skipped, needs {broken} which failed\n")
-            log.append({'step': name, 'status': 'skipped', 'seconds': 0.0,
-                        'note': f'needs {broken}'})
+            log[name] = {'step': name, 'status': 'skipped', 'seconds': 0.0,
+                         'note': f'needs {broken}'}
+            write_log()
             continue
 
-        print(f"{header}  ->  {overrides['output_dir'].relative_to(model_dir)}")
+        # A folder alone is not proof a step finished: one that crashed or was
+        # killed partway leaves a folder too. The log tells those apart - every
+        # step is marked running before it starts, and only overwritten once it
+        # ends - so the folder is trusted only when the log does not contradict it.
+        output_dir = overrides['output_dir']
+        has_output = output_dir.is_dir() and any(output_dir.iterdir())
+        last_status = log.get(name, {}).get('status')
+        rerun_reason = ('in rerun' if name in cfg.rerun
+                        else f"last run {last_status}"
+                        if last_status in ('failed', 'running', 'skipped')
+                        else f"reads {[n for n in needs if n in ran]}, run this time"
+                        if any(n in ran for n in needs) else None)
+        if cfg.skip_completed and has_output and rerun_reason is None:
+            print(f"{header}: already done, skipped\n")
+            if last_status is None:
+                log[name] = {'step': name, 'status': 'ok', 'seconds': 0.0,
+                             'note': 'output folder existed before logging'}
+                write_log()
+            continue
+
+        note = f"  ({rerun_reason})" if has_output and rerun_reason else ''
+        print(f"{header}  ->  {output_dir.relative_to(model_dir)}{note}")
+        log[name] = {'step': name, 'status': 'running', 'seconds': 0.0, 'note': ''}
+        write_log()
         start = time.time()
         process = context.Process(target=run_step, args=(module, overrides))
         process.start()
         process.join()
         seconds = time.time() - start
+        ran.add(name)
 
         status = 'ok' if process.exitcode == 0 else 'failed'
         print(f"{header}: {status} in {seconds / 60:.1f} min\n")
-        log.append({'step': name, 'status': status, 'seconds': round(seconds, 1),
-                    'note': '' if status == 'ok' else f'exit code {process.exitcode}'})
-        pd.DataFrame(log).to_csv(model_dir / 'pipeline_log.csv', index=False)
+        log[name] = {'step': name, 'status': status, 'seconds': round(seconds, 1),
+                     'note': '' if status == 'ok' else f'exit code {process.exitcode}'}
+        write_log()
 
         if status == 'failed':
             failed.add(name)
@@ -277,11 +336,13 @@ def main(overrides=None):
                 print("Stopping: continue_on_error is False")
                 break
 
-    frame = pd.DataFrame(log)
-    frame.to_csv(model_dir / 'pipeline_log.csv', index=False)
-    print(f"Finished {label}")
-    for row in frame.itertuples():
-        print(f"  {row.status:8s} {row.step:26s} {row.seconds / 60:6.1f} min  {row.note}")
+    print(f"Finished {label}  (ran {len(ran)} of {len(plan)} steps this time)")
+    for name in plan:
+        if name in log:
+            row = log[name]
+            when = 'this run' if name in ran else 'earlier'
+            print(f"  {row['status']:8s} {name:26s} {float(row['seconds']) / 60:6.1f} min"
+                  f"  {when:8s}  {row['note']}")
     print(f"\nResults, model_info.json and pipeline_log.csv in {model_dir}")
     if failed:
         raise SystemExit(1)

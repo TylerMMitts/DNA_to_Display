@@ -280,6 +280,7 @@ producer first:
 | `generate_from_dataset.py` | One generated image per real image, side by side |
 | `generate_parent_archetypes.py` | What each of the eight founder parents should look like |
 | `founder_archetype_strategies.py` | Compares ways of building a founder genotype to generate from |
+| `generate_held_out_seeds.py` | Seven generated images beside every root whose genotype the model never trained on |
 
 **Understanding what the model learned** - `code/latent_diffusion/analysis/`
 
@@ -347,7 +348,14 @@ training improves.
 | `snp_output_contribution` | `analysis/snp_output_contribution.py` | Those SNPs' effects in the final image, by tissue |
 | `parent_archetypes` | `generation/generate_parent_archetypes.py` | The eight founders as this model draws them |
 | `founder_strategies` | `generation/founder_archetype_strategies.py` | Ways of building a founder genotype, compared |
+| `held_out_seeds` | `generation/generate_held_out_seeds.py` | Every held-out root beside seven generated images of its genotype |
 | `gallery` (off) | `generation/generate_from_dataset.py` | Real and generated side by side, for browsing |
+
+Rerunning for the same model skips every step whose folder already exists, so
+after a new step is added only that step runs. A step the last run logged as
+failed, or left unfinished because the job was killed, is run again, and so is
+any step that reads the output of one run this time. To redo a finished step,
+for example after changing its settings, name it in `rerun`.
 
 Comment a step out of `steps` to skip it, and use `step_settings` to change any
 one script's settings for a quicker pass, for example

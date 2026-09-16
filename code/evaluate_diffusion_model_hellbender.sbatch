@@ -14,8 +14,9 @@
 #     mkdir -p results/model_analysis/slurm
 #     sbatch code/evaluate_diffusion_model_hellbender.sbatch
 #
-# Rerunning is safe: each analysis rewrites its own subfolder, and a failed step
-# is logged in pipeline_log.csv without stopping the ones that do not need it.
+# Resubmitting skips every step already done for this model, so a job that hit
+# its time limit picks up where it stopped. A failed step is logged in
+# pipeline_log.csv without stopping the ones that do not need it.
 #SBATCH --job-name=evaluate_diffusion
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1

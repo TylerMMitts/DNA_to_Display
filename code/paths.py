@@ -55,6 +55,19 @@ SEED_SCALED_METADATA = SEED_RESULTS_DIR / 'seed_scaled_metadata.csv'
 SEED_LITEVAE_DIR = MODELS_DIR / 'litevae_seeds'
 SEED_LITEVAE_MODEL = SEED_LITEVAE_DIR / 'litevae_seeds_best.pt'
 
+# The seed diffusion model evaluate_seed_diffusion_model.py analyses by default.
+# train_seeds.py writes one folder per size; medium is the default size there.
+SEED_DIFFUSION_DIR = MODELS_DIR / 'diffusion_seeds_medium'
+SEED_DIFFUSION_MODEL = SEED_DIFFUSION_DIR / 'diffusion_seeds_medium_best.pt'
+
+# Size, shape and colour of the real kernels, measured from their pixels by
+# kernel_traits/measure_kernel_traits.py. It needs no model, so it is measured
+# once here rather than per model.
+SEED_KERNEL_TRAITS_DIR = SEED_RESULTS_DIR / 'kernel_traits'
+
+# Per-checkpoint analysis folders for seed models, kept apart from the root ones.
+SEED_MODEL_ANALYSIS_DIR = SEED_RESULTS_DIR / 'model_analysis'
+
 # One folder of weights per trainable model, and every checkpoint inside it is
 # prefixed with that model's name. A loose checkpoint_epoch_100.pt says nothing
 # about which model wrote it once it has been copied somewhere else.

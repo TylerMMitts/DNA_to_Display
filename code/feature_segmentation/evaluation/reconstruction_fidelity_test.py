@@ -86,6 +86,14 @@ def measure(result, imgsz=256, min_vessel_px=4, connectivity=2,
     for cls_id, key in ((0, 'root'), (1, 'stele')):
         if masks[cls_id]:
             best = int(np.argmax(confs[cls_id]))
+            # Filled before it is measured. Ultralytics trains with overlapping
+            # masks painted smaller-over-larger, so the model learned 'root' as
+            # a ring around the stele and 'stele' with holes where the vessels
+            # are. Unfilled, root diameter was really cortex area and came out
+            # 38 px small at r = 0.40 against the annotations on held-out
+            # images; filled, it is 1.6 px off at r = 0.95, and stele diameter
+            # goes from 12.3 px off to 2.1 (cross_validate_segmentation.py).
+            masks[cls_id][best] = ndimage.binary_fill_holes(masks[cls_id][best])
             area = float(masks[cls_id][best].sum())
             traits[f'{key}_area_px'] = area
             # Equivalent-circle diameter: the diameter a circle of equal area
@@ -111,6 +119,55 @@ def measure(result, imgsz=256, min_vessel_px=4, connectivity=2,
     if traits['root_diameter_px'] > 0:
         traits['stele_root_diameter_ratio'] = (traits['stele_diameter_px'] /
                                                traits['root_diameter_px'])
+    return traits, masks
+
+
+# The input size a segmenter was trained at, read from its weights, so every
+# script feeds it the size it learned on without a setting to keep in step.
+def segmenter_imgsz(seg):
+    ckpt = getattr(seg, 'ckpt', None) or {}
+    return int((ckpt.get('train_args') or {}).get('imgsz', 256))
+
+
+# The image a segmenter sees. Every image in the project is 256 px - crops are
+# squashed to it and generated roots are made at it - so a segmenter trained at
+# 512 px gets the same image upscaled, exactly as its training images were.
+def segmenter_input(seg, image_rgb):
+    imgsz = segmenter_imgsz(seg)
+    if image_rgb.shape[:2] == (imgsz, imgsz):
+        return image_rgb, imgsz
+    return np.array(Image.fromarray(image_rgb).resize((imgsz, imgsz), Image.BICUBIC)), imgsz
+
+
+def resize_mask(mask, size):
+    t = torch.from_numpy(mask.astype(np.float32))[None, None]
+    return F.interpolate(t, size=(size, size), mode='area')[0, 0].numpy() > 0.5
+
+
+# Segments one image and measures it, in the pixel units of the image passed in.
+#
+# The one entry point analysis scripts use, so the segmenter's input size, hole
+# filling and vessel counting are the same everywhere. A 512 px segmenter halves
+# the error in vessel area and shrinks the count error from 0.71 to 0.59 vessels
+# on held-out images (cross_validate_segmentation.py). Its vessels are counted at
+# 512 px, where the walls between them exist, and the watershed spacing and
+# minimum vessel size are scaled up to match; areas and diameters are then
+# converted back, and masks are returned at the input size for overlays.
+def segment(seg, image_rgb, conf=0.25, device=None, min_vessel_px=4, connectivity=2,
+            watershed_min_distance=6):
+    size = image_rgb.shape[0]
+    pixels, imgsz = segmenter_input(seg, image_rgb)
+    result = seg.predict(pixels[:, :, ::-1], conf=conf, imgsz=imgsz, device=device,
+                         verbose=False)[0]
+    k = imgsz / size
+    traits, masks = measure(result, imgsz, max(1, round(min_vessel_px * k * k)), connectivity,
+                            watershed_min_distance=round(watershed_min_distance * k))
+    if k != 1:
+        for key in ('root_area_px', 'stele_area_px', 'vessel_total_area_px'):
+            traits[key] /= k * k
+        for key in ('root_diameter_px', 'stele_diameter_px'):
+            traits[key] /= k
+        masks = {c: [resize_mask(m, size) for m in ms] for c, ms in masks.items()}
     return traits, masks
 
 
@@ -265,14 +322,10 @@ def main():
             orig_img = to_uint8(batch[i])
             recon_img = to_uint8(recon[i])
 
-            # Ultralytics expects BGR for ndarray input.
-            r_orig = seg.predict(orig_img[:, :, ::-1], conf=cfg.conf, imgsz=cfg.imgsz,
-                                 device=cfg.device, verbose=False)[0]
-            r_recon = seg.predict(recon_img[:, :, ::-1], conf=cfg.conf, imgsz=cfg.imgsz,
-                                  device=cfg.device, verbose=False)[0]
-
-            t_orig, m_orig = measure(r_orig, cfg.imgsz, cfg.min_vessel_px, cfg.connectivity)
-            t_recon, m_recon = measure(r_recon, cfg.imgsz, cfg.min_vessel_px, cfg.connectivity)
+            t_orig, m_orig = segment(seg, orig_img, cfg.conf, cfg.device,
+                                     cfg.min_vessel_px, cfg.connectivity)
+            t_recon, m_recon = segment(seg, recon_img, cfg.conf, cfg.device,
+                                       cfg.min_vessel_px, cfg.connectivity)
 
             save_comparison(path.stem, orig_img, m_orig, t_orig,
                             recon_img, m_recon, t_recon,

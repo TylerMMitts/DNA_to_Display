@@ -63,7 +63,7 @@ from feature_segmentation.evaluation.latent_average_test import (
     load_litevae, load_image, to_uint8, encode,
 )
 from feature_segmentation.evaluation.reconstruction_fidelity_test import (
-    measure, overlay,
+    overlay, segment,
 )
 
 
@@ -90,9 +90,7 @@ def survey_pool(seg, paths, imgsz, conf, min_vessel_px, connectivity, device, ba
     rows = []
     for i, path in enumerate(paths):
         img = np.array(Image.open(path).convert('RGB').resize((imgsz, imgsz), Image.LANCZOS))
-        result = seg.predict(img[:, :, ::-1], conf=conf, imgsz=imgsz,
-                             device=device, verbose=False)[0]
-        traits, _ = measure(result, imgsz, min_vessel_px, connectivity)
+        traits, _ = segment(seg, img, conf, device, min_vessel_px, connectivity)
         rows.append({'path': str(path), 'stem': Path(path).stem,
                      'vessel_count': traits['vessel_count_cc'],
                      'vessel_area': traits['vessel_total_area_px'],
@@ -336,9 +334,8 @@ def main():
         images, masks_list, obs_counts, sharps = [], [], [], []
         for i, a in enumerate(cfg.alphas):
             img = to_uint8(decoded[i])
-            result = seg.predict(img[:, :, ::-1], conf=cfg.conf, imgsz=cfg.imgsz,
-                                 device=cfg.device, verbose=False)[0]
-            traits, masks = measure(result, cfg.imgsz, cfg.min_vessel_px, cfg.connectivity)
+            traits, masks = segment(seg, img, cfg.conf, cfg.device, cfg.min_vessel_px,
+                                    cfg.connectivity)
             images.append(img)
             masks_list.append(masks)
             obs_counts.append(traits['vessel_count_cc'])

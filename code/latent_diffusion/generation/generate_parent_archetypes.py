@@ -443,7 +443,7 @@ def main(overrides=None):
     if cfg.segment:
         try:
             from ultralytics import YOLO
-            from feature_segmentation.evaluation.reconstruction_fidelity_test import measure, overlay
+            from feature_segmentation.evaluation.reconstruction_fidelity_test import overlay, segment
             seg = YOLO(str(resolve_input(cfg.seg_weights, 'segmentation weights')))
         except (SystemExit, FileNotFoundError, ImportError) as exc:
             print(f"Skipping segmentation: {exc}")
@@ -453,9 +453,7 @@ def main(overrides=None):
             overlays_by_seed = {seed: [] for seed in cfg.seeds}
             for seed in cfg.seeds:
                 for k, img in zip(parents, images_by_seed[seed]):
-                    result = seg.predict(img[:, :, ::-1], conf=0.25, imgsz=cfg.imgsz,
-                                         device=cfg.device, verbose=False)[0]
-                    traits, masks = measure(result, cfg.imgsz)
+                    traits, masks = segment(seg, img, 0.25, cfg.device)
                     trait_rows.append({'parent': k, 'seed': seed, **traits})
                     overlays_by_seed[seed].append(overlay(img, masks))
 

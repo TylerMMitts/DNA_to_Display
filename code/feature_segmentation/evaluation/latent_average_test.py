@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from scipy import ndimage
 
 # Puts code/ on the import path so this file can be run directly by path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -107,7 +108,10 @@ def measure(result, imgsz=256, min_vessel_px=4):
             # Exactly one root and one stele exist per image; if the model
             # returns several, the most confident is the intended one.
             best = idx[np.argmax(confs[idx])]
-            area = area_of(masks[best])
+            # Filled first: the model draws root as a ring around the stele and
+            # stele with holes at the vessels. See measure() in
+            # reconstruction_fidelity_test.py for the measured effect.
+            area = area_of(ndimage.binary_fill_holes(masks[best] > 0.5))
             traits[f'{key}_area_px'] = area
             # Equivalent-circle diameter: the diameter a circle of this area
             # would have. More robust than a bounding-box side for non-circular
@@ -245,8 +249,13 @@ def main():
 
     # segment and measure
     print("Segmenting...")
+    # Imported here: reconstruction_fidelity_test imports this file at the top.
+    from feature_segmentation.evaluation.reconstruction_fidelity_test import segmenter_input
     for kind, name, image, meta in to_segment:
-        result = seg.predict(image[:, :, ::-1], conf=cfg.conf, imgsz=cfg.imgsz,
+        # At the size the segmenter was trained at. measure() rescales areas to
+        # cfg.imgsz, so traits stay in this script's units either way.
+        pixels, seg_imgsz = segmenter_input(seg, image)
+        result = seg.predict(pixels[:, :, ::-1], conf=cfg.conf, imgsz=seg_imgsz,
                              device=cfg.device, verbose=False)[0]
         traits = measure(result, cfg.imgsz, cfg.min_vessel_px)
         records.append({'kind': kind, 'name': name, **meta, **traits})

@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from paths import (
-    DATASET_DIR, RESULTS_DIR, SEGMENTATION_DATASET, SEGMENTATION_DIR,
+    DATASET_DIR, RESULTS_DIR, SEGMENTATION_DATASET_512, SEGMENTATION_DIR,
     SEGMENTATION_MODEL,
 )
 
@@ -31,10 +31,14 @@ def main():
     class cfg:
         # Data.
         source_dataset = DATASET_DIR / 'root_features_new.yolov8'
-        prepared_dataset = SEGMENTATION_DATASET
-        force_reprepare = False   # True to rebuild the 256x256 dataset from source
+        prepared_dataset = SEGMENTATION_DATASET_512
+        force_reprepare = False   # True to rebuild the dataset from source
 
-        val_fraction = 0.2        # 34 images -> 27 train / 7 val
+        # Every annotated image trains. How accurate this recipe is was measured
+        # by cross_validate_segmentation.py, where each image was scored by a
+        # model that never saw it; holding 7 images out here as well would only
+        # train the final model on less and score it on too few to trust.
+        val_fraction = 0.0
         rot90_augment = True      # lossless 4x expansion of the training split
 
         # Nano: with a small annotated set, a larger backbone overfits almost
@@ -45,9 +49,21 @@ def main():
         # and on vessel-count bias - see results/segmentation_model_comparison.
         model = 'yolov8n-seg.pt'
 
-        imgsz = 256               # matches the latent diffusion model's output
-        epochs = 50
-        patience = 10             # stop early after 10 epochs with no improvement
+        # 512 px, fed 256 px images upscaled 2x. Held out, this halved the vessel
+        # area error (9.4% -> 4.4%) and cut the vessel count error from 0.71 to
+        # 0.59 against 256 px: masks are predicted at a quarter of the input size,
+        # and 64x64 cannot draw the walls between adjacent vessels.
+        imgsz = 512
+        # Images are squashed to this size before upscaling, because the images
+        # being measured - crops and generated roots - exist at 256 px.
+        source_size = 256
+
+        # A fixed length, since with no held-out images there is nothing to stop
+        # on. The 512 px cross-validation folds peaked between epochs 12 and 32
+        # (median 20) and early-stopped by 30-42; with a quarter more images per
+        # epoch here, 25 sits in that range. patience 0 turns early stopping off.
+        epochs = 25
+        patience = 0
         batch = 4
         seed = 0
 
@@ -98,6 +114,7 @@ def main():
             val_fraction=cfg.val_fraction,
             seed=cfg.seed,
             rot90_augment=cfg.rot90_augment,
+            source_size=cfg.source_size,
         )
     else:
         print(f"Using prepared dataset at {data_yaml}")
@@ -134,24 +151,40 @@ def main():
         hsv_v=cfg.hsv_v,
     )
 
-    run_weights = Path(cfg.project) / cfg.name / 'weights' / 'best.pt'
-    print(f"\nBest weights from this run: {run_weights}")
+    # The last epoch, not best.pt: with no held-out images, best.pt is chosen on
+    # an in-sample score, and the epoch count was set from held-out folds instead.
+    # With a held-out split, best.pt is the right choice again.
+    weights_name = 'last.pt' if cfg.val_fraction == 0 else 'best.pt'
+    run_weights = Path(cfg.project) / cfg.name / 'weights' / weights_name
+    print(f"\nWeights from this run: {run_weights}")
 
-    # Ultralytics names every run's output best.pt, so it is copied into models/
+    # Ultralytics names every run's output the same, so it is copied into models/
     # under this model's name. Every script that loads a segmenter reads that
     # copy, so retraining is picked up without editing any other config.
     weights_dir = Path(cfg.weights_dir)
     weights_dir.mkdir(parents=True, exist_ok=True)
     published = weights_dir / f'{MODEL_NAME}_best.pt'
+
+    # The weights being replaced are kept, named by when they were written, so
+    # results measured with them can still be reproduced.
+    if published.exists():
+        from datetime import datetime
+        stamp = datetime.fromtimestamp(published.stat().st_mtime).strftime('%Y%m%d_%H%M')
+        kept = weights_dir / f'{MODEL_NAME}_replaced_{stamp}.pt'
+        if not kept.exists():
+            shutil.copy2(published, kept)
+            print(f"Kept the previous weights as {kept.name}")
+
     shutil.copy2(run_weights, published)
     print(f"Copied to {published}")
     if published != SEGMENTATION_MODEL:
         print(f"NOTE: paths.SEGMENTATION_MODEL points at {SEGMENTATION_MODEL}, "
               "so other scripts will not pick this up until that matches.")
 
-    print("Validating best checkpoint:")
+    print("Validating the published weights" +
+          (" (in-sample: every image trained)" if cfg.val_fraction == 0 else "") + ":")
     YOLO(str(published)).val(data=str(data_yaml), imgsz=cfg.imgsz, split='val',
-                             device=cfg.device)
+                             device=cfg.device, workers=0)
 
 
 if __name__ == '__main__':

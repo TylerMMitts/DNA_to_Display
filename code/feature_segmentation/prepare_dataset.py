@@ -52,15 +52,31 @@ def write_label(path, rows):
     Path(path).write_text('\n'.join(lines) + ('\n' if lines else ''))
 
 
-def resize_square(src_image, dst_image, imgsz):
+def resize_square(src_image, dst_image, imgsz, source_size=None):
     # Squash-resizes to imgsz x imgsz, matching transforms.Resize((256, 256)).
+    #
+    # With source_size, the image is squashed to that size first and upscaled
+    # from there. A 512 px segmenter only ever measures 256 px images upscaled -
+    # generated roots exist at 256 px and no larger - so its training images are
+    # made the same way rather than downsampled straight from the full-resolution
+    # scans, which would carry detail it never sees at measurement time.
     with Image.open(src_image) as im:
-        im = im.convert('RGB').resize((imgsz, imgsz), Image.LANCZOS)
+        im = im.convert('RGB')
+        if source_size and source_size != imgsz:
+            im = im.resize((source_size, source_size), Image.LANCZOS).resize(
+                (imgsz, imgsz), Image.BICUBIC)
+        else:
+            im = im.resize((imgsz, imgsz), Image.LANCZOS)
         im.save(dst_image, quality=95)
 
 
+# val_fraction 0 puts every image in training. Ultralytics still needs a
+# validation set to run, so it is pointed at the unrotated training images and
+# its scores are in-sample: accuracy is measured by cross_validate_segmentation.py
+# instead, and training runs for a fixed number of epochs rather than stopping on
+# a validation score that no longer means anything.
 def prepare(source_dir, output_dir, imgsz=256, val_fraction=0.2, seed=0,
-            rot90_augment=True):
+            rot90_augment=True, source_size=None):
     source_dir = Path(source_dir)
     output_dir = Path(output_dir)
 
@@ -73,7 +89,7 @@ def prepare(source_dir, output_dir, imgsz=256, val_fraction=0.2, seed=0,
 
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(src_images))
-    n_val = max(1, int(round(len(src_images) * val_fraction)))
+    n_val = max(1, int(round(len(src_images) * val_fraction))) if val_fraction > 0 else 0
     val_idx = set(order[:n_val].tolist())
 
     if output_dir.exists():
@@ -95,9 +111,12 @@ def prepare(source_dir, output_dir, imgsz=256, val_fraction=0.2, seed=0,
         stem = image_path.stem
 
         dst_image = output_dir / split / 'images' / f'{stem}.jpg'
-        resize_square(image_path, dst_image, imgsz)
+        resize_square(image_path, dst_image, imgsz, source_size)
         write_label(output_dir / split / 'labels' / f'{stem}.txt', rows)
         counts[split] += 1
+        if n_val == 0:
+            shutil.copy2(dst_image, output_dir / 'val' / 'images' / dst_image.name)
+            write_label(output_dir / 'val' / 'labels' / f'{stem}.txt', rows)
 
         # Rotations go on the training split only. Augmenting validation would
         # inflate the metrics with near-duplicates of images already scored.
@@ -126,6 +145,8 @@ def prepare(source_dir, output_dir, imgsz=256, val_fraction=0.2, seed=0,
 
     print(f"Prepared {counts['train']} train / {counts['val']} val images "
           f"at {imgsz}x{imgsz} in {output_dir}")
+    if n_val == 0:
+        print("  (no held-out images: val is a copy of the unrotated training images)")
     if rot90_augment:
         print(f"  (train includes 90/180/270-degree rotations of each source image)")
     return yaml_path

@@ -21,6 +21,10 @@
 # on the true mask but poor on the predicted mask, the counter is fine and the
 # segmenter is the problem; if it is poor on both, the counter is at fault.
 #
+# Its images are mostly the segmenter's own training images, so its scores are
+# optimistic. cross_validate_segmentation.py scores every image with a model that
+# never trained on it, and is the comparison to trust.
+#
 # Usage
 #     python code/feature_segmentation/evaluation/validate_vessel_counting.py
 
@@ -42,7 +46,7 @@ from paths import RESULTS_DIR, SEGMENTATION_MODEL, resolve_input, resolve_output
 
 from ultralytics import YOLO
 
-from feature_segmentation.evaluation.reconstruction_fidelity_test import class_masks
+from feature_segmentation.evaluation.reconstruction_fidelity_test import class_masks, segmenter_input
 from feature_segmentation.vessel_counting import count_vessels
 
 VESSEL_CLASS = 2
@@ -140,7 +144,10 @@ def main():
         gt_mask, true_count = load_ground_truth(label_path, cfg.imgsz)
         img = np.array(Image.open(image_path).convert('RGB'))
 
-        result = seg.predict(img[:, :, ::-1], conf=cfg.conf, imgsz=cfg.imgsz,
+        # Predicted at the segmenter's own training size; masks come back at
+        # cfg.imgsz for comparison with the 256 px annotations.
+        pixels, seg_imgsz = segmenter_input(seg, img)
+        result = seg.predict(pixels[:, :, ::-1], conf=cfg.conf, imgsz=seg_imgsz,
                              device=cfg.device, verbose=False)[0]
         masks, _ = class_masks(result, cfg.imgsz)
         pred_mask = np.zeros((cfg.imgsz, cfg.imgsz), dtype=bool)

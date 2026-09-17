@@ -35,7 +35,7 @@ from latent_diffusion.generation.generate_from_dataset import (
     generate_batch, load_original,
 )
 from feature_segmentation.evaluation.reconstruction_fidelity_test import (
-    measure, overlay,
+    overlay, segment,
 )
 
 TRAITS = [
@@ -337,13 +337,10 @@ def main(overrides=None):
         for r, gen_img in zip(batch, cached):
             real_img = load_original(r['image_path'], cfg.imgsz)
 
-            res_real = seg.predict(real_img[:, :, ::-1], conf=cfg.conf,
-                                   imgsz=cfg.imgsz, device=cfg.device, verbose=False)[0]
-            res_gen = seg.predict(gen_img[:, :, ::-1], conf=cfg.conf,
-                                  imgsz=cfg.imgsz, device=cfg.device, verbose=False)[0]
-
-            t_real, m_real = measure(res_real, cfg.imgsz, cfg.min_vessel_px, cfg.connectivity)
-            t_gen, m_gen = measure(res_gen, cfg.imgsz, cfg.min_vessel_px, cfg.connectivity)
+            t_real, m_real = segment(seg, real_img, cfg.conf, cfg.device,
+                                     cfg.min_vessel_px, cfg.connectivity)
+            t_gen, m_gen = segment(seg, gen_img, cfg.conf, cfg.device,
+                                   cfg.min_vessel_px, cfg.connectivity)
 
             if n_figures < cfg.max_pair_figures:
                 save_pair_figure(Path(r['filename']).stem, r['genotype'],

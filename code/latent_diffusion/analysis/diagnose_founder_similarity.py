@@ -271,7 +271,7 @@ def main():
     if cfg.segment:
         try:
             from ultralytics import YOLO
-            from feature_segmentation.evaluation.reconstruction_fidelity_test import measure
+            from feature_segmentation.evaluation.reconstruction_fidelity_test import segment
             seg = YOLO(str(resolve_input(cfg.seg_weights, 'segmentation weights')))
         except (SystemExit, FileNotFoundError, ImportError) as exc:
             print(f"\nSkipping segmentation: {exc}")
@@ -281,10 +281,7 @@ def main():
             print("\nMeasuring anatomy on each founder image...")
             for strategy, imgs in by_strategy.items():
                 for k, img in zip(cfg.founders, imgs):
-                    res = seg.predict(img[:, :, ::-1], conf=cfg.seg_conf,
-                                      imgsz=cfg.imgsz, device=cfg.device,
-                                      verbose=False)[0]
-                    traits, _ = measure(res, cfg.imgsz)
+                    traits, _ = segment(seg, img, cfg.seg_conf, cfg.device)
                     trait_rows.append({
                         'strategy': strategy, 'founder': k,
                         'vessel_count': traits.get('vessel_count_cc', np.nan),

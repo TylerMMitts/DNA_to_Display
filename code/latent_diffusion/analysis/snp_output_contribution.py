@@ -185,8 +185,14 @@ def regions_over_genotypes(seg_model, baseline, per_genotype, imgsz, conf):
 # shares are not a strict partition and can sum slightly over what they cover.
 # The outside_share closes the rest of the gap: it is everything falling on no
 # mask at all, which is mostly background around the root.
+#
+# Masks are not hole-filled here, unlike the trait measurements: region shares
+# want the cortex and stele as separate regions, which is what the unfilled
+# masks already are.
 def contribution_by_region(seg_model, image_rgb, abs_map, imgsz, conf):
-    result = seg_model.predict(image_rgb[:, :, ::-1], conf=conf, imgsz=imgsz,
+    from feature_segmentation.evaluation.reconstruction_fidelity_test import segmenter_input
+    pixels, seg_imgsz = segmenter_input(seg_model, image_rgb)
+    result = seg_model.predict(pixels[:, :, ::-1], conf=conf, imgsz=seg_imgsz,
                                verbose=False)[0]
     out = {}
     if result.masks is None or len(result.masks.data) == 0:

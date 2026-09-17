@@ -276,7 +276,7 @@ def save_genotype_panel(genotype, original_img, generated_imgs, seed_labels,
     # not just plausible texture. original_img may be None if no photo was
     # found for this genotype; that column is then left blank rather than
     # dropped, so column position (image N) still lines up between panels.
-    from feature_segmentation.evaluation.reconstruction_fidelity_test import measure, overlay
+    from feature_segmentation.evaluation.reconstruction_fidelity_test import overlay, segment
 
     images = [original_img] + list(generated_imgs)
     titles = ['original'] + [f'seed {s}' for s in seed_labels]
@@ -301,9 +301,7 @@ def save_genotype_panel(genotype, original_img, generated_imgs, seed_labels,
 
         axes[0, j].imshow(img)
 
-        result = seg_model.predict(img[:, :, ::-1], conf=conf, imgsz=imgsz,
-                                   verbose=False)[0]
-        traits, masks = measure(result, imgsz=imgsz)
+        traits, masks = segment(seg_model, img, conf)
         axes[1, j].imshow(overlay(img, masks))
         axes[1, j].set_xlabel(format_trait_sublabel(traits), fontsize=7.5)
 

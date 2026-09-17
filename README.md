@@ -157,8 +157,25 @@ python code/feature_segmentation/train_segmentation.py
 ```
 
 It prepares the annotated dataset if that has not been done, trains, then
-copies the best weights to `models/feature_segmentation/` and validates them.
-Plots and logs go to `results/training/feature_segmentation/`.
+copies the weights to `models/feature_segmentation/` and validates them. The
+weights they replace are kept beside them, named by date. Plots and logs go to
+`results/training/feature_segmentation/`.
+
+The recipe was chosen by cross-validation, where every annotated image is scored
+by a model that never trained on it:
+
+```bash
+python code/feature_segmentation/evaluation/cross_validate_segmentation.py
+```
+
+It trains at 512 px on 256 px images upscaled 2x, on every annotated image, for
+a fixed 25 epochs. Every script measures traits through `segment()` in
+`evaluation/reconstruction_fidelity_test.py`, which feeds the segmenter the size
+it was trained at and reports traits in 256 px units. Root and stele masks are
+filled before measuring: the model draws the root as a ring around the stele,
+and unfilled, root diameter was 38 px too small on held-out images at r = 0.40
+against the annotations (filled: 1.6 px, r = 0.95). Traits measured before this
+change are not comparable with ones measured after it.
 
 ## The seed dataset
 
@@ -309,7 +326,8 @@ producer first:
 | `evaluation/genetic_fidelity_test.py` | Do generated traits track the real traits for that genotype? |
 | `evaluation/train_vs_test_accuracy.py` | Is it better on genotypes it trained on than unseen ones? |
 | `evaluation/reconstruction_fidelity_test.py` | Does LiteVAE preserve traits through encode and decode? |
-| `evaluation/validate_vessel_counting.py` | Which vessel-counting method matches hand counts? |
+| `evaluation/cross_validate_segmentation.py` | How accurate is each trait on images the segmenter never trained on, at 256 vs 512 px? |
+| `evaluation/validate_vessel_counting.py` | Which vessel-counting method matches hand counts? (mostly training images; superseded by the above) |
 | `evaluation/vessel_interpolation_test.py` | Is vessel count a smooth axis in the latent space? |
 | `evaluation/latent_average_test.py` | What does averaging two latents produce? |
 | `evaluation/latent_comparison.py` | How do latents compare across genotypes? |

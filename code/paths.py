@@ -28,6 +28,9 @@ SNP_PARQUET = METADATA_DIR / 'MEMA_gene_matrix.parquet'
 KINSHIP_MATRIX = METADATA_DIR / 'kinship_matrix.csv'
 IMAGE_METADATA = METADATA_DIR / 'image_metadata.csv'
 SEGMENTATION_DATASET = DATASET_DIR / 'root_features_256'
+# The dataset the current segmenter trains on: every annotated image, squashed to
+# 256 px and upscaled to 512, as cross_validate_segmentation.py chose.
+SEGMENTATION_DATASET_512 = DATASET_DIR / 'root_features_512_all'
 
 # The seed-kernel dataset. Same eight founders and the same one-hot treatment as
 # the root data, but a different locus set (33,527 against 43,788), founders

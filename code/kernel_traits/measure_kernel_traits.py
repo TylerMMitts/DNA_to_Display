@@ -134,8 +134,21 @@ def measure_kernel(rgb, px_per_mm, ink_threshold=245, min_area_px=200, erode_px=
 
 # The single px/mm every scaled image shares, read from the metadata rather than
 # repeated here, so a rescale at a different scale cannot silently disagree.
-def scale_from_metadata(metadata):
-    values = metadata['px_per_mm'].unique()
+#
+# Metadata written before rescale_seed_crops.py recorded millimetres has only
+# px_per_bar. The images themselves are identical - that version already used
+# 97 px per bar - so the scale is px_per_bar over the bar's real length, which
+# crop_seed_scans.py established as 5 mm (236 px at 1200 dpi).
+def scale_from_metadata(metadata, bar_mm=5.0):
+    if 'px_per_mm' in metadata:
+        values = metadata['px_per_mm'].unique()
+    elif 'px_per_bar' in metadata:
+        print(f"  seed metadata predates the px_per_mm column; using px_per_bar / "
+              f"{bar_mm} mm. Rerun rescale_seed_crops.py to add it.")
+        values = (metadata['px_per_bar'] / bar_mm).unique()
+    else:
+        raise SystemExit("seed metadata has neither px_per_mm nor px_per_bar, so the "
+                         "scale of the images is unknown - rerun rescale_seed_crops.py")
     if len(values) != 1:
         raise SystemExit(f"seed metadata has {len(values)} different px_per_mm values; "
                          "the images are not at one common scale")

@@ -9,7 +9,9 @@
 #
 # The root segmenter has nothing to find in a kernel, so trait fidelity measures
 # kernels from their pixels instead: size from the non-white mask at the common
-# px/mm scale, colour from the pixels inside it. Rerunning for the same model
+# px/mm scale, colour from the pixels inside it. The per-gene maps and the
+# sampling trajectory are the same scripts the root pipeline runs, reading the
+# dataset from the checkpoint. Rerunning for the same model
 # skips every step whose folder already exists, so a newly added step is the
 # only one that runs.
 
@@ -48,6 +50,31 @@ def build_steps(checkpoint, d):
         'held_out_kernels': ('latent_diffusion.generation.generate_held_out_kernels', {
             'checkpoint': checkpoint, 'output_dir': d / 'held_out_kernels', 'pca_cache': pca,
         }, []),
+        # The reverse process for trained and held-out genotypes: the latent at
+        # each shown step on top, decoded underneath.
+        'sampling_trajectory': ('latent_diffusion.analysis.sampling_trajectory', {
+            'checkpoint': checkpoint, 'output_dir': d / 'sampling_trajectory', 'pca_cache': pca,
+        }, []),
+        # Per-gene maps, the same two scripts the root pipeline runs. Both read
+        # the dataset from the checkpoint, so they pick up the seed SNP table and
+        # the seed LiteVAE themselves. The first picks loci whose attention
+        # patterns differ most and draws each one's attention maps; the second
+        # regenerates kernels with each locus flipped and maps where the decoded
+        # kernel changes.
+        'snp_diverse_maps': ('latent_diffusion.analysis.select_diverse_snp_maps', {
+            'checkpoint': checkpoint, 'output_dir': d / 'snp_diverse_maps', 'pca_cache': pca,
+            'sensitivity_cache': d / 'snp_diverse_maps' / 'population_sensitivity.csv',
+        }, []),
+        # A run of 50 markers is flipped rather than one: on the root model a
+        # single SNP moved the decoded image too little to localise, and the
+        # tissue split it gave did not reproduce between genotype samples. The
+        # root segmenter has nothing to find in a kernel, so there is no tissue
+        # breakdown or tissue screen here.
+        'snp_output_contribution': ('latent_diffusion.analysis.snp_output_contribution', {
+            'checkpoint': checkpoint, 'output_dir': d / 'snp_output_contribution',
+            'diverse_csv': d / 'snp_diverse_maps' / 'diverse_snp_details.csv',
+            'block_size': 50, 'top_n': 5,
+        }, ['snp_diverse_maps']),
     }
 
 
@@ -65,6 +92,9 @@ def main(overrides=None):
             'memorization',
             'kernel_traits',
             'held_out_kernels',
+            'sampling_trajectory',
+            'snp_diverse_maps',
+            'snp_output_contribution',
         ]
 
         # Skip a step whose output folder already exists for this model, so

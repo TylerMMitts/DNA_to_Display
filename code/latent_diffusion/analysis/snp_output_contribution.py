@@ -31,12 +31,14 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
-    DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SEGMENTATION_MODEL, SNP_PARQUET,
+    DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SEGMENTATION_MODEL,
     resolve_input, resolve_output,
     apply_overrides,
 )
 
-from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
+from latent_diffusion.utils.dataset_inputs import (
+    checkpoint_dataset, load_decoder, load_snp_table,
+)
 from latent_diffusion.utils import attention_analysis as aa
 from latent_diffusion.analysis.analyze_snp_attention import load_model
 from latent_diffusion.analysis.analyze_pca_sensitivity import population_sensitivity
@@ -401,8 +403,10 @@ def main(overrides=None):
     #     python code/latent_diffusion/analysis/snp_output_contribution.py
     class cfg:
         checkpoint = DIFFUSION_ONEHOT_MODEL
-        litevae_checkpoint = None        # None -> paths.LITEVAE_MODEL
-        snp_parquet = SNP_PARQUET
+        # None -> the autoencoder and SNP table of the checkpoint's own dataset,
+        # so a root or a seed model can be pointed at this unchanged.
+        litevae_checkpoint = None
+        snp_parquet = None
         output_dir = RESULTS_DIR / 'snp_output_contribution'
 
         # Which loci to map, in order of precedence.
@@ -501,8 +505,16 @@ def main(overrides=None):
     print(f"Device: {device}\nOutput: {out}")
 
     # data
-    sample_names, snp_names, snp_matrix = load_snp_data_from_parquet(
-        resolve_input(cfg.snp_parquet, 'SNP parquet'))
+    dataset = checkpoint_dataset(resolve_input(cfg.checkpoint, 'checkpoint'))
+    print(f"Dataset: {dataset}")
+    # The segmenter was trained on root cross-sections and has nothing to find in
+    # a kernel, so on a seed model the anatomical breakdown is switched off. The
+    # maps themselves are unaffected; only the per-tissue columns of the CSV are
+    # absent.
+    if dataset == 'seeds' and cfg.segment:
+        print("  seed model: no segmenter for kernels, so the tissue breakdown is off")
+        cfg.segment = False
+    sample_names, snp_names, snp_matrix = load_snp_table(dataset, cfg.snp_parquet)
     snp_matrix = np.asarray(snp_matrix)
 
     # model
@@ -523,22 +535,14 @@ def main(overrides=None):
     latent_shape = (unet_cfg['latent_channels'], cfg.latent_size, cfg.latent_size)
 
     from latent_diffusion.diffusion.scheduler import DiffusionScheduler
-    from litevae.models import LiteVAEDecoder
-    from paths import LITEVAE_MODEL
 
     scheduler = DiffusionScheduler()
     scheduler.betas = scheduler.betas.to(device)
     scheduler.alphas = scheduler.alphas.to(device)
     scheduler.alpha_bars = scheduler.alpha_bars.to(device)
 
-    vae_path = resolve_input(cfg.litevae_checkpoint or LITEVAE_MODEL,
-                             'LiteVAE checkpoint')
-    vae_ckpt = torch.load(vae_path, map_location=device, weights_only=False)
-    decoder = LiteVAEDecoder(latent_channels=unet_cfg['latent_channels'],
-                             output_channels=3, base_channels=512,
-                             num_res_blocks=2)
-    decoder.load_state_dict(vae_ckpt['decoder_state_dict'])
-    decoder.to(device).eval()
+    decoder = load_decoder(dataset, device, unet_cfg['latent_channels'],
+                           cfg.litevae_checkpoint)
 
     seg_model = None
     if cfg.segment:

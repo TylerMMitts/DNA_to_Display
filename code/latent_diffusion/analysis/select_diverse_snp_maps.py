@@ -19,12 +19,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
-    DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, SNP_PARQUET, resolve_input,
+    DIFFUSION_ONEHOT_MODEL, RESULTS_DIR, resolve_input,
     resolve_output,
     apply_overrides,
 )
 
-from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
+from latent_diffusion.utils.dataset_inputs import checkpoint_dataset, load_snp_table
 from latent_diffusion.analysis.analyze_snp_attention import load_model
 from latent_diffusion.analysis.analyze_pca_sensitivity import population_sensitivity
 from latent_diffusion.analysis.analyze_snp_spatial_contribution import (
@@ -167,7 +167,9 @@ def main(overrides=None):
     #     python code/latent_diffusion/analysis/select_diverse_snp_maps.py
     class cfg:
         checkpoint = DIFFUSION_ONEHOT_MODEL
-        snp_parquet = SNP_PARQUET
+        # None -> the table the checkpoint's own dataset was trained on, so a
+        # root or a seed model can be pointed at this unchanged.
+        snp_parquet = None
         output_dir = RESULTS_DIR / 'snp_diverse_maps'
         pca_cache = RESULTS_DIR / 'attention_analysis' / 'pca.pkl'       # legacy path only
         sensitivity_cache = RESULTS_DIR / 'snp_diverse_maps' / 'population_sensitivity.csv'
@@ -215,8 +217,9 @@ def main(overrides=None):
     maps_dir.mkdir(exist_ok=True)
     print(f"Device: {device}\nOutput: {out}")
 
-    sample_names, snp_names, snp_matrix = load_snp_data_from_parquet(
-        resolve_input(cfg.snp_parquet, 'SNP parquet'))
+    dataset = checkpoint_dataset(resolve_input(cfg.checkpoint, 'checkpoint'))
+    print(f"Dataset: {dataset}")
+    sample_names, snp_names, snp_matrix = load_snp_table(dataset, cfg.snp_parquet)
     snp_matrix = np.asarray(snp_matrix)
 
     snp_encoder, unet, unet_cfg = load_model(

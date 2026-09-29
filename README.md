@@ -426,6 +426,17 @@ Each pipeline refuses a checkpoint from the other dataset before running anythin
 | `memorization` | `analysis/analyze_seed_memorization.py` | Does the right genotype help on held-out kernels, or only on trained ones? |
 | `kernel_traits` | `kernel_traits/kernel_trait_fidelity.py` | Do generated kernels have the size, shape and colour their genotype should give? |
 | `held_out_kernels` | `generation/generate_held_out_kernels.py` | Every held-out kernel beside seven generated kernels of its genotype |
+| `sampling_trajectory` | `analysis/sampling_trajectory.py` | The reverse process for trained and held-out genotypes: latent on top, decoded underneath |
+| `snp_diverse_maps` | `analysis/select_diverse_snp_maps.py` | Per-gene attention maps for the loci whose patterns differ most |
+| `snp_output_contribution` | `analysis/snp_output_contribution.py` | Where the decoded kernel changes when a run of 50 markers is flipped |
+
+The last three are the same scripts the root pipeline uses. They read the
+dataset from the checkpoint (`train_seeds.py` records `dataset='seeds'`) and
+pick up the seed SNP table and seed LiteVAE through
+[code/latent_diffusion/utils/dataset_inputs.py](code/latent_diffusion/utils/dataset_inputs.py),
+so nothing has to be set by hand. The per-gene maps have no tissue breakdown
+on kernels, since that needs the root segmenter.
+
 
 The root segmenter has nothing to find in a kernel, so `kernel_traits` measures
 kernels from their pixels. Every scaled image is one kernel on white at 19.4

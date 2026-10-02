@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     pick_device,
     CROPPED_IMAGES_DIR, IMAGE_METADATA, LITEVAE_MODEL, MODELS_DIR, SNP_PARQUET,
-    TRAINING_RESULTS_DIR, best_checkpoint_path, checkpoint_path, find_latest_checkpoint,
-    resolve_input, resolve_output,
+    TRAINING_RESULTS_DIR, apply_overrides, best_checkpoint_path, checkpoint_path,
+    find_latest_checkpoint, resolve_input, resolve_output,
 )
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
@@ -219,7 +219,7 @@ def find_resumable_checkpoint(save_dir, run_name):
         return None
 
 
-def main():
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/training/train_onehot.py
     # On Hellbender, train_onehot_hellbender.sbatch runs one size per array task.
@@ -227,6 +227,11 @@ def main():
         # One of SIZE_PRESETS. The DIFFUSION_SIZE environment variable overrides
         # it, which is how the Hellbender array job trains several at once.
         model_size = 'medium'
+
+        # Names the weights folder and the results folder. None ->
+        # diffusion_onehot_<size>. A run on different data needs a name of its
+        # own, or it would resume from and overwrite the real model's checkpoints.
+        run_name = None
 
         snp_parquet = SNP_PARQUET
         metadata_path = IMAGE_METADATA
@@ -289,11 +294,13 @@ def main():
         # Training images scored the same way, to compare against validation.
         n_train_eval_images = 160
 
+    apply_overrides(cfg, overrides)
+
     size = os.environ.get('DIFFUSION_SIZE', cfg.model_size)
     if size not in SIZE_PRESETS:
         raise SystemExit(f"unknown model size {size!r}; choose one of {list(SIZE_PRESETS)}")
     preset = SIZE_PRESETS[size]
-    run_name = f'{MODEL_NAME}_{size}'
+    run_name = cfg.run_name or f'{MODEL_NAME}_{size}'
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)

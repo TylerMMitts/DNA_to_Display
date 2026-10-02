@@ -1,0 +1,70 @@
+{
+  "built": "2026-10-01",
+  "block_size": 4000,
+  "gene_names": "SYN_STELE_00001 .. SYN_STELE_04000",
+  "source_parquet": "D:\\DNA_to_Display\\dataset\\metadata\\MEMA_gene_matrix.parquet",
+  "source_sha256": "57713f8c761bb50f05053fcbf7d5d972736d2955bf705ff63bfaf9dfa3fdd7c1",
+  "ranking_csv": "D:\\DNA_to_Display\\results\\synthetic_stele\\real_root_traits\\genotype_stele_ranking.csv",
+  "n_genotypes": 200,
+  "n_with_measured_stele": 137,
+  "unmeasured_genotypes": "random code, seed 0 - never trained on, no image",
+  "codes": {
+    "1": {
+      "n_measured": 18,
+      "stele_range_px": [
+        101.1767638930928,
+        121.85965705626782
+      ]
+    },
+    "2": {
+      "n_measured": 17,
+      "stele_range_px": [
+        121.95854195412592,
+        126.27095137025007
+      ]
+    },
+    "3": {
+      "n_measured": 17,
+      "stele_range_px": [
+        127.03532054470908,
+        129.38862082094371
+      ]
+    },
+    "4": {
+      "n_measured": 17,
+      "stele_range_px": [
+        129.47444579908046,
+        132.38689356774108
+      ]
+    },
+    "5": {
+      "n_measured": 17,
+      "stele_range_px": [
+        132.43934951692302,
+        134.65642798777927
+      ]
+    },
+    "6": {
+      "n_measured": 17,
+      "stele_range_px": [
+        134.71136401266966,
+        137.50367437618922
+      ]
+    },
+    "7": {
+      "n_measured": 17,
+      "stele_range_px": [
+        137.74180991867803,
+        141.83431872743935
+      ]
+    },
+    "8": {
+      "n_measured": 17,
+      "stele_range_px": [
+        142.23865220204863,
+        156.14187707397633
+      ]
+    }
+  },
+  "output": "D:\\DNA_to_Display\\dataset\\synthetic_stele\\MEMA_gene_matrix_synthetic_stele_k4000.parquet"
+}

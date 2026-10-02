@@ -79,6 +79,9 @@ SEGMENTATION_DIR = MODELS_DIR / 'feature_segmentation'
 LITEVAE_DIR = MODELS_DIR / 'litevae'
 DIFFUSION_ONEHOT_DIR = MODELS_DIR / 'diffusion_onehot'
 DIFFUSION_NUMERIC_DIR = MODELS_DIR / 'diffusion_numeric'
+# The resized root model train_onehot.py writes at its default size. The 209M
+# model in diffusion_onehot/ memorised its training images; this is its successor.
+DIFFUSION_ONEHOT_MEDIUM_DIR = MODELS_DIR / 'diffusion_onehot_medium'
 
 # The specific weights each script reaches for when its config is left alone.
 SEGMENTATION_MODEL = SEGMENTATION_DIR / 'feature_segmentation_best.pt'
@@ -96,6 +99,16 @@ TRAINING_RESULTS_DIR = RESULTS_DIR / 'training'
 # valid for the model that produced them.
 MODEL_ANALYSIS_DIR = RESULTS_DIR / 'model_analysis'
 
+# The synthetic-stele experiment: a copy of the SNP table with extra genes whose
+# founder code follows each genotype's measured stele size, a model trained on
+# it, and its results. Kept in folders of its own so nothing in it can be read
+# in place of the real data by a script left at its defaults.
+SYNTHETIC_STELE_DIR = DATASET_DIR / 'synthetic_stele'
+SYNTHETIC_STELE_RESULTS_DIR = RESULTS_DIR / 'synthetic_stele'
+# The training run's name: weights in models/<it>/, previews in results/training/<it>/.
+SYNTHETIC_STELE_RUN = 'diffusion_onehot_synthetic_stele'
+SYNTHETIC_STELE_MODEL_DIR = MODELS_DIR / SYNTHETIC_STELE_RUN
+
 # The stem used for checkpoint filenames, keyed by the folder holding them.
 # Kept in one place so a rename only has to happen here.
 MODEL_NAMES = {
@@ -104,6 +117,8 @@ MODEL_NAMES = {
     SEED_LITEVAE_DIR: 'litevae_seeds',
     DIFFUSION_ONEHOT_DIR: 'diffusion_onehot',
     DIFFUSION_NUMERIC_DIR: 'diffusion_numeric',
+    DIFFUSION_ONEHOT_MEDIUM_DIR: 'diffusion_onehot_medium',
+    SYNTHETIC_STELE_MODEL_DIR: SYNTHETIC_STELE_RUN,
 }
 
 

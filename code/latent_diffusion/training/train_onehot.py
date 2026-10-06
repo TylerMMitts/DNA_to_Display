@@ -212,6 +212,18 @@ def warm_start_unet(unet, checkpoint_path, device):
 # Finds the newest checkpoint to resume from, or None if the folder holds none.
 # paths.find_latest_checkpoint raises when there is nothing to load, which is a
 # normal first run here rather than an error.
+# diffusion_onehot_<size>, with the experiment settings appended when they are
+# not the defaults - diffusion_onehot_medium_lines50, ..._cnoise0p5 - so an
+# experiment never resumes from or overwrites the real model's checkpoints.
+def default_run_name(size, n_train_genotypes=None, condition_noise=0.0):
+    name = f'{MODEL_NAME}_{size}'
+    if n_train_genotypes is not None:
+        name += f'_lines{n_train_genotypes}'
+    if condition_noise:
+        name += '_cnoise' + f'{condition_noise:g}'.replace('.', 'p')
+    return name
+
+
 def find_resumable_checkpoint(save_dir, run_name):
     try:
         return find_latest_checkpoint(save_dir, run_name)
@@ -240,6 +252,24 @@ def main(overrides=None):
 
         save_every = 25
         val_fraction = 0.2
+
+        # Trains on only the first N training genotypes of the shuffled split.
+        # The held-out genotypes are the same whatever N is, and the subsets are
+        # nested - the first 50 are among the first 80 - so runs at 50, 80 and
+        # the full 110 show whether held-out genotype gain rises with the number
+        # of lines, which is what imaging more lines would buy. None -> all of
+        # them. The DIFFUSION_TRAIN_LINES environment variable overrides it.
+        n_train_genotypes = None
+
+        # Gaussian noise added to each training image's genotype on every step,
+        # in units of each PCA component's spread across lines: 0.5 moves a
+        # genotype by half the typical difference between lines along every
+        # component. A genotype that is never quite the same twice is a poor key
+        # for recalling one line's images, so the model has more reason to learn
+        # what genotypes have in common. Training only - evaluation, previews and
+        # every analysis script see exact genotypes. 0 -> none. The
+        # DIFFUSION_CONDITION_NOISE environment variable overrides it.
+        condition_noise = 0.0
 
         # Saves sample images for preview during training
         save_previews = True
@@ -295,12 +325,18 @@ def main(overrides=None):
         n_train_eval_images = 160
 
     apply_overrides(cfg, overrides)
+    if os.environ.get('DIFFUSION_TRAIN_LINES'):
+        cfg.n_train_genotypes = int(os.environ['DIFFUSION_TRAIN_LINES'])
+    if os.environ.get('DIFFUSION_CONDITION_NOISE'):
+        cfg.condition_noise = float(os.environ['DIFFUSION_CONDITION_NOISE'])
+    if cfg.condition_noise < 0:
+        raise SystemExit("condition_noise cannot be negative")
 
     size = os.environ.get('DIFFUSION_SIZE', cfg.model_size)
     if size not in SIZE_PRESETS:
         raise SystemExit(f"unknown model size {size!r}; choose one of {list(SIZE_PRESETS)}")
     preset = SIZE_PRESETS[size]
-    run_name = cfg.run_name or f'{MODEL_NAME}_{size}'
+    run_name = cfg.run_name or default_run_name(size, cfg.n_train_genotypes, cfg.condition_noise)
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -354,6 +390,10 @@ def main(overrides=None):
 
     projected = projector.transform(snp_matrix)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(sample_names)}
+    # How far apart lines sit along each PCA component; condition_noise is
+    # measured in these units.
+    component_spread = torch.tensor(projected.std(axis=0), dtype=torch.float32,
+                                    device=cfg.device)
 
     # Image data and metadata
     image_dir = resolve_input(cfg.image_dir, 'image directory')
@@ -373,6 +413,17 @@ def main(overrides=None):
     n_val = max(1, int(round(len(genotypes) * cfg.val_fraction)))
     val_genotypes = set(genotypes[:n_val])
 
+    # Training genotypes in their shuffled order, so a subset is the first N
+    # of the same list every time and smaller subsets nest inside larger ones.
+    train_genotypes = genotypes[n_val:]
+    n_available = len(train_genotypes)
+    if cfg.n_train_genotypes is not None:
+        if not 2 <= cfg.n_train_genotypes <= n_available:
+            raise SystemExit(f"n_train_genotypes must be between 2 and {n_available}, "
+                             f"the training genotypes available")
+        train_genotypes = train_genotypes[:cfg.n_train_genotypes]
+    train_set = set(train_genotypes)
+
     if resume_ckpt is not None:
         saved_val_genotypes = set(resume_ckpt['val_genotypes'])
         if saved_val_genotypes != val_genotypes:
@@ -381,12 +432,29 @@ def main(overrides=None):
                 "checkpoint's saved split - image_dir or the metadata must have "
                 "changed since that checkpoint was written. Fix the data "
                 "mismatch, or set resume = False to start over.")
+        # Checkpoints from before these options trained on every genotype
+        # outside the split, without noise.
+        saved_train = set(resume_ckpt.get('train_genotypes') or
+                          [g for g in genotypes if g not in val_genotypes])
+        if saved_train != train_set:
+            raise SystemExit("Resuming, but the checkpoint trained on a different set of "
+                             "training genotypes - n_train_genotypes has changed since it "
+                             "was written. Give this run its own run_name.")
+        if float(resume_ckpt.get('condition_noise', 0.0)) != float(cfg.condition_noise):
+            raise SystemExit("Resuming, but the checkpoint was trained with condition_noise "
+                             f"{resume_ckpt.get('condition_noise', 0.0)}, not "
+                             f"{cfg.condition_noise}. Give this run its own run_name.")
 
-    train_samples = [s for s in samples if s['genotype'] not in val_genotypes]
+    train_samples = [s for s in samples if s['genotype'] in train_set]
     val_samples = [s for s in samples if s['genotype'] in val_genotypes]
-    print(f"  train: {len(train_samples)} images / "
-          f"{len(genotypes) - n_val} genotypes")
+    print(f"  train: {len(train_samples)} images / {len(train_set)} genotypes"
+          + (f" (first {len(train_set)} of {n_available}; the other "
+             f"{n_available - len(train_set)} are not used at all)"
+             if len(train_set) < n_available else ''))
     print(f"  val:   {len(val_samples)} images / {n_val} genotypes")
+    if cfg.condition_noise:
+        print(f"  condition noise: {cfg.condition_noise:g} x each PCA component's "
+              "spread across lines, training steps only")
 
     assign_wrong_genotypes(train_samples, projected_by_genotype, cfg.seed)
     assign_wrong_genotypes(val_samples, projected_by_genotype, cfg.seed)
@@ -631,6 +699,8 @@ def main(overrides=None):
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
             images = batch['image'].to(device, non_blocking=True)
             snp = batch['snp'].to(device, non_blocking=True)
+            if cfg.condition_noise:
+                snp = snp + cfg.condition_noise * component_spread * torch.randn_like(snp)
 
             loss = ldm(images, snp)
             optimizer.zero_grad()
@@ -674,6 +744,10 @@ def main(overrides=None):
                 'encoding': 'one_hot_founders',
                 'founders': list(founders),
                 'val_genotypes': sorted(val_genotypes),
+                # The lines it trained on, which is every line outside the split
+                # unless n_train_genotypes made it a subset.
+                'train_genotypes': sorted(train_set),
+                'condition_noise': float(cfg.condition_noise),
                 'model_size': size,
                 'genotype_gain_heldout': val_gain,
                 'genotype_gain_trained': train_gain,
@@ -703,6 +777,9 @@ def main(overrides=None):
             'resumed_from': str(resume_path) if resume_path else None,
             'started_at_epoch': start_epoch,
             'image_dir': str(image_dir),
+            'n_train_genotypes': len(train_set),
+            'n_val_genotypes': len(val_genotypes),
+            'condition_noise': float(cfg.condition_noise),
             'epochs': cfg.num_epochs,
             'best_val_loss': best_val,
             'final': history[-1] if history else None,

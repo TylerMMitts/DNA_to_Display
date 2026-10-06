@@ -29,32 +29,68 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from paths import (
-    CROPPED_IMAGES_DIR, DIFFUSION_ONEHOT_MODEL, IMAGE_METADATA, LITEVAE_MODEL,
-    RESULTS_DIR, SNP_PARQUET, apply_overrides, pick_device, resolve_input,
-    resolve_output,
+    CROPPED_IMAGES_DIR, DIFFUSION_ONEHOT_MODEL, IMAGE_METADATA, KINSHIP_MATRIX,
+    LITEVAE_MODEL, RESULTS_DIR, SNP_PARQUET, apply_overrides, pick_device,
+    resolve_input, resolve_output,
 )
 
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
-from latent_diffusion.analysis.analyze_snp_attention import load_model
+from latent_diffusion.analysis.analyze_snp_attention import load_model, load_similarity
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 # The loader and transforms are taken from the root trainer rather than written
 # again here, so images are prepared exactly as they were during training.
 from latent_diffusion.training.train_onehot import load_litevae, make_transforms
 
 
-# A partner genotype for every image, drawn from its own split and never its
-# own genotype. Fixed by seed, so a rerun compares the same pairs.
-def wrong_partners(genotypes, splits, seed):
+# A partner genotype for every image, drawn from its own split and never its own.
+#
+# The least related genotype in that split, by kinship, rather than a random one.
+# The pools here are small - 27 held-out lines - and every line in this population
+# descends from the same eight founders, so a random partner often shares long
+# stretches of genome with the right one. That makes the wrong condition easier
+# than it should be and shrinks the measured gain. Taking the least related line
+# makes the contrast as stark as this population allows.
+#
+# Ties and genotypes missing from the kinship matrix fall back to a seeded random
+# pick, so the choice is always defined and always reproducible. Returns the
+# partners and how related each pair is, which the summary reports: a "wrong"
+# genotype that is still a close relative is worth knowing about.
+def wrong_partners(genotypes, splits, seed, similarity=None, names=None,
+                   mode='least related'):
     rng = np.random.default_rng(seed)
+    index_of = {n: i for i, n in enumerate(names or [])}
     partner = np.empty(len(genotypes), dtype=object)
+    relatedness = np.full(len(genotypes), np.nan)
+
     for split in np.unique(splits):
         pool = sorted(set(genotypes[splits == split]))
         if len(pool) < 2:
             raise SystemExit(f"the {split} split has fewer than two genotypes, "
                              "so there is no other genotype to swap in")
         for i in np.flatnonzero(splits == split):
-            partner[i] = rng.choice([g for g in pool if g != genotypes[i]])
-    return partner
+            others = [g for g in pool if g != genotypes[i]]
+            scored = []
+            if mode == 'least related' and similarity is not None and genotypes[i] in index_of:
+                # Sorted pool, so equal kinship always resolves the same way.
+                scored = [(similarity[index_of[genotypes[i]], index_of[g]], g)
+                          for g in others if g in index_of]
+            if scored:
+                relatedness[i], partner[i] = min(scored)
+                continue
+            partner[i] = rng.choice(others)
+            if similarity is not None and genotypes[i] in index_of and partner[i] in index_of:
+                relatedness[i] = similarity[index_of[genotypes[i]], index_of[partner[i]]]
+    return partner, relatedness
+
+
+# Mean kinship between every pair of different genotypes within a split, as the
+# reference the chosen partners are judged against.
+def pool_relatedness(genotypes, splits, split, similarity, names):
+    index_of = {n: i for i, n in enumerate(names or [])}
+    pool = [g for g in sorted(set(genotypes[splits == split])) if g in index_of]
+    values = [similarity[index_of[a], index_of[b]]
+              for k, a in enumerate(pool) for b in pool[k + 1:]]
+    return float(np.mean(values)) if values else np.nan
 
 
 def main(overrides=None):
@@ -67,6 +103,14 @@ def main(overrides=None):
         metadata_path = IMAGE_METADATA
         image_dir = CROPPED_IMAGES_DIR
         output_dir = RESULTS_DIR / 'genotype_memorization'
+
+        # Which genotype stands in as the wrong one. 'least related' picks the
+        # furthest line in the same split by kinship, so the two conditions are
+        # as different as the population allows; 'random' is a seeded draw from
+        # the split, which is easier and was what this test used before.
+        partner = 'least related'
+        # None falls back to correlation between raw SNP vectors.
+        kinship = KINSHIP_MATRIX
 
         # Spread across the schedule. Memorisation shows most in the middle:
         # at the lowest noise every model does well and at the highest none can.
@@ -101,6 +145,11 @@ def main(overrides=None):
         raise SystemExit(f"{checkpoint_path.name} records no validation split, so "
                          "there is no way to tell trained genotypes from held-out ones")
     held_out = set(ckpt['val_genotypes'])
+    # A run trained on a subset of lines (n_train_genotypes) records which ones;
+    # the lines it left out are neither trained nor held out, so they are not
+    # scored. Older checkpoints trained on every line outside the split.
+    trained_lines = set(ckpt['train_genotypes']) if ckpt.get('train_genotypes') else None
+    condition_noise = float(ckpt.get('condition_noise', 0.0))
     epoch = ckpt.get('epoch')
     del ckpt
 
@@ -118,7 +167,9 @@ def main(overrides=None):
     image_dir = resolve_input(cfg.image_dir, 'image directory')
     metadata = pd.read_csv(resolve_input(cfg.metadata_path, 'image metadata'))
     items = [(image_dir / r.new_filename, r.genotype) for r in metadata.itertuples()
-             if r.genotype in row_of and (image_dir / r.new_filename).exists()]
+             if r.genotype in row_of and (image_dir / r.new_filename).exists()
+             and (trained_lines is None or r.genotype in trained_lines
+                  or r.genotype in held_out)]
     if cfg.max_images is not None:
         items = items[:cfg.max_images]
     if not items:
@@ -130,7 +181,15 @@ def main(overrides=None):
         sel = splits == split
         print(f"  {split:9s} {int(sel.sum()):4d} images from "
               f"{len(set(genotypes[sel])):3d} genotypes")
-    partners = wrong_partners(genotypes, splits, cfg.seed)
+    similarity, sim_names, sim_source = load_similarity(cfg.kinship, names, snp_matrix)
+    partners, relatedness = wrong_partners(genotypes, splits, cfg.seed, similarity,
+                                           sim_names, cfg.partner)
+    print(f"  wrong genotype: {cfg.partner} in the same split, by {sim_source}")
+    for split in ('trained', 'held out'):
+        sel = splits == split
+        print(f"    {split:9s} mean relatedness to its partner "
+              f"{np.nanmean(relatedness[sel]):.3f}  "
+              f"(average pair in that split {pool_relatedness(genotypes, splits, split, similarity, sim_names):.3f})")
 
     # Latents are encoded once, seeded, so every timestep sees the same ones.
     transform = make_transforms(cfg.image_size, False)
@@ -167,6 +226,8 @@ def main(overrides=None):
                     for k, value in enumerate(loss.mean(dim=(1, 2, 3)).cpu().numpy()):
                         rows.append({'image': items[start + k][0].name,
                                      'genotype': genotypes[start + k],
+                                     'wrong_genotype': partners[start + k],
+                                     'relatedness': float(relatedness[start + k]),
                                      'split': splits[start + k], 'timestep': t,
                                      'condition': condition, 'loss': float(value)})
             print(f"  t={t} done")
@@ -191,7 +252,14 @@ def main(overrides=None):
         'n_images': len(items),
         'n_trained_genotypes': len(set(genotypes[splits == 'trained'])),
         'n_held_out_genotypes': len(set(genotypes[splits == 'held out'])),
+        'condition_noise': condition_noise,
         'timesteps': list(cfg.timesteps),
+        'partner': cfg.partner,
+        'similarity_source': sim_source,
+        'partner_relatedness': {s: float(np.nanmean(relatedness[splits == s]))
+                                for s in ('trained', 'held out')},
+        'pool_relatedness': {s: pool_relatedness(genotypes, splits, s, similarity, sim_names)
+                             for s in ('trained', 'held out')},
         'loss': {f'{s} / {c}': float(v) for (s, c), v in means.items()},
         'genotype_gain_trained': gain('trained'),
         'genotype_gain_held_out': gain('held out'),

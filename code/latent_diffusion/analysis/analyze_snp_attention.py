@@ -128,6 +128,20 @@ def load_model(checkpoint_path, snp_matrix, device, pca_cache=None):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     print(f"Checkpoint epoch {ckpt.get('epoch', '?')}, loss {ckpt.get('loss', float('nan')):.4f}")
 
+    # Founder-window checkpoints (train_seeds.py, encoding='windows') carry a
+    # window layout instead of a PCA basis; their wrapper takes raw codes too.
+    if ckpt.get('encoding') == 'founder_windows':
+        from latent_diffusion.models.window_encoding import load_window_encoder
+        snp_encoder = load_window_encoder(ckpt).to(device).eval()
+        unet_cfg = infer_unet_config(ckpt['unet_state_dict'])
+        print(f"Encoding: founder windows ({snp_encoder.projector.n_windows} windows of "
+              f"{snp_encoder.projector.window_size} genes), "
+              f"{int((snp_encoder.encoder.gates() > 0).sum())} open")
+        unet = DenoisingUNet(**unet_cfg)
+        unet.load_state_dict(ckpt['unet_state_dict'])
+        unet.to(device).eval()
+        return snp_encoder, unet, unet_cfg
+
     enc_cfg = infer_snp_encoder_config(ckpt['snp_encoder_state_dict'])
     unet_cfg = infer_unet_config(ckpt['unet_state_dict'])
     print(f"SNP encoder: {enc_cfg}")

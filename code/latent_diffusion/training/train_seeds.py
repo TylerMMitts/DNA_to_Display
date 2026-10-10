@@ -40,13 +40,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from paths import (
     pick_device, MODELS_DIR, SEED_LITEVAE_MODEL, SEED_SCALED_DIR,
     SEED_SCALED_METADATA, SEED_SNP_PARQUET, TRAINING_RESULTS_DIR,
-    best_checkpoint_path, checkpoint_path, find_latest_checkpoint,
+    apply_overrides, best_checkpoint_path, checkpoint_path, find_latest_checkpoint,
     resolve_input, resolve_output,
 )
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.snp_encoder import load_seed_snp_data_from_parquet
 from latent_diffusion.models.snp_encoding import SNPProjector, OneHotSNPEncoder
+from latent_diffusion.models.window_encoding import GatedWindowEncoder, WindowProjector
 from latent_diffusion.models.unet import DenoisingUNet
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
@@ -207,7 +208,34 @@ def find_resumable_checkpoint(save_dir, run_name):
         return None
 
 
-def main():
+# diffusion_seeds_<size>, with the window settings appended when the window
+# encoding is used - diffusion_seeds_medium_windows200_sp1e-04 - so a window run
+# never resumes from or overwrites the PCA model's checkpoints.
+def default_run_name(size, encoding, window_size, window_sparsity):
+    name = f'{MODEL_NAME}_{size}'
+    if encoding == 'windows':
+        name += f'_windows{window_size}_sp{window_sparsity:.0e}'
+    return name
+
+
+# Gate report: one row per window, its genes and how open its gate is. Written
+# with every periodic checkpoint so the windows the model keeps can be followed
+# through training.
+def save_gate_report(snp_encoder, projector, path):
+    with torch.no_grad():
+        prob = snp_encoder.open_probability().cpu().numpy()
+        was_training = snp_encoder.training
+        snp_encoder.eval()
+        gate = snp_encoder.gates().cpu().numpy()
+        snp_encoder.train(was_training)
+    rows = projector.window_bounds()
+    for r, p, g in zip(rows, prob, gate):
+        r.update({'open_probability': float(p), 'gate_eval': float(g), 'open': bool(g > 0)})
+    pd.DataFrame(rows).sort_values('open_probability', ascending=False).to_csv(path, index=False)
+    return int((gate > 0).sum())
+
+
+def main(overrides=None):
     # Edit these values, then run:
     #     python code/latent_diffusion/training/train_seeds.py
     # On Hellbender, train_seeds_hellbender.sbatch runs one size per array task.
@@ -215,6 +243,27 @@ def main():
         # One of SIZE_PRESETS. The DIFFUSION_SIZE environment variable overrides
         # it, which is how the Hellbender array job trains several at once.
         model_size = os.environ.get('DIFFUSION_SIZE', 'medium')
+
+        # How the genotype reaches the encoder (see window_encoding.py):
+        #   'pca'     - one-hot founders compressed by PCA, as every model so far
+        #   'windows' - founder shares in windows of neighbouring genes, each
+        #               behind a learned gate that a sparsity penalty pushes shut
+        # DIFFUSION_ENCODING overrides it.
+        encoding = os.environ.get('DIFFUSION_ENCODING', 'pca')
+        # Genes per window. The kernel-colour region is ~456 genes, two or three
+        # windows at 200. DIFFUSION_WINDOW_SIZE overrides it.
+        window_size = int(os.environ.get('DIFFUSION_WINDOW_SIZE', 200))
+        # Penalty added to the loss per window expected to be open. A window
+        # stays open only if it lowers the denoising loss (~0.2-0.3) by more than
+        # this. Larger -> fewer windows. DIFFUSION_WINDOW_SPARSITY overrides it;
+        # 3e-5, 1e-4 and 3e-4 bracket a sensible range.
+        window_sparsity = float(os.environ.get('DIFFUSION_WINDOW_SPARSITY', 1e-4))
+        # The gates need a faster rate than the network: at the encoder's 1e-4 a
+        # gate would take thousands of epochs to close.
+        window_gate_learning_rate = 1e-2
+
+        # None -> diffusion_seeds_<size>, plus the window settings for a window run.
+        run_name = None
 
         snp_parquet = SEED_SNP_PARQUET
         metadata_path = SEED_SCALED_METADATA
@@ -277,11 +326,16 @@ def main():
         # Training images scored the same way, to compare against validation.
         n_train_eval_images = 160
 
+    apply_overrides(cfg, overrides)
     size = cfg.model_size
     if size not in SIZE_PRESETS:
         raise SystemExit(f"unknown model size {size!r}; choose one of {list(SIZE_PRESETS)}")
+    if cfg.encoding not in ('pca', 'windows'):
+        raise SystemExit(f"encoding must be 'pca' or 'windows', not {cfg.encoding!r}")
+    windows = cfg.encoding == 'windows'
     preset = SIZE_PRESETS[size]
-    run_name = f'{MODEL_NAME}_{size}'
+    run_name = cfg.run_name or default_run_name(size, cfg.encoding, cfg.window_size,
+                                                cfg.window_sparsity)
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -313,9 +367,14 @@ def main():
     snp_matrix = np.asarray(snp_matrix)
 
     if resume_ckpt is not None:
+        saved_encoding = 'windows' if resume_ckpt.get('encoding') == 'founder_windows' else 'pca'
+        if saved_encoding != cfg.encoding:
+            raise SystemExit(f"{resume_path.name} was trained with encoding={saved_encoding!r}, "
+                             f"not {cfg.encoding!r}. Give this run its own run_name.")
         # Reuses the exact basis already in use rather than refitting
         founders = tuple(resume_ckpt['founders'])
-        projector = SNPProjector.from_state_dict(resume_ckpt['snp_projector'])
+        projector = (WindowProjector if windows else SNPProjector).from_state_dict(
+            resume_ckpt['snp_projector'])
         print(f"Founders: {founders}")
         print(f"Restored SNP projector from checkpoint: "
               f"{projector.output_dim} dimensions")
@@ -325,13 +384,19 @@ def main():
             founders = tuple(sorted(int(v) for v in np.unique(snp_matrix) if v > 0))
         print(f"Founders: {founders}")
 
-        print("\nFitting one-hot PCA projection...")
-        t0 = time.time()
-        projector = SNPProjector(founders=founders,
-                                 target_variance=cfg.pca_target_variance,
-                                 random_state=cfg.pca_random_state).fit(snp_matrix)
-        print(f"  projected to {projector.output_dim} dimensions "
-              f"in {time.time() - t0:.1f}s")
+        if windows:
+            projector = WindowProjector(founders, cfg.window_size).fit(snp_matrix, snp_names)
+            print(f"\nFounder windows: {projector.n_windows} windows of {cfg.window_size} genes "
+                  f"x {len(founders)} founders = {projector.output_dim} features, "
+                  f"sparsity {cfg.window_sparsity:g} per open window")
+        else:
+            print("\nFitting one-hot PCA projection...")
+            t0 = time.time()
+            projector = SNPProjector(founders=founders,
+                                     target_variance=cfg.pca_target_variance,
+                                     random_state=cfg.pca_random_state).fit(snp_matrix)
+            print(f"  projected to {projector.output_dim} dimensions "
+                  f"in {time.time() - t0:.1f}s")
 
     projected = projector.transform(snp_matrix)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(sample_names)}
@@ -406,12 +471,19 @@ def main():
         batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
         pin_memory=pin)
 
-    encoder_config = {
-        'input_dim': projector.output_dim,
-        'embedding_dim': preset['snp_embed_dim'],
-        'num_tokens': cfg.num_tokens,
-        'hidden_dim': preset['encoder_hidden_dim'],
-    }
+    if windows:
+        encoder_config = {
+            'n_windows': projector.n_windows, 'n_founders': len(founders),
+            'embedding_dim': preset['snp_embed_dim'], 'num_tokens': cfg.num_tokens,
+            'hidden_dim': preset['encoder_hidden_dim'], 'init_open': 0.9,
+        }
+    else:
+        encoder_config = {
+            'input_dim': projector.output_dim,
+            'embedding_dim': preset['snp_embed_dim'],
+            'num_tokens': cfg.num_tokens,
+            'hidden_dim': preset['encoder_hidden_dim'],
+        }
     unet_config = {
         'latent_channels': cfg.latent_channels, 'base_channels': preset['base_channels'],
         'snp_embed_dim': preset['snp_embed_dim'], 'd_attention': preset['d_attention'],
@@ -429,7 +501,7 @@ def main():
                 f"  checkpoint: {saved_unet}\n  preset:     {unet_config}\n"
                 "Restore the preset, or move that folder's checkpoints aside to start over.")
 
-    snp_encoder = OneHotSNPEncoder(**encoder_config).to(device)
+    snp_encoder = (GatedWindowEncoder if windows else OneHotSNPEncoder)(**encoder_config).to(device)
     unet = DenoisingUNet(**unet_config).to(device)
 
     if resume_ckpt is not None:
@@ -471,10 +543,14 @@ def main():
     print(f"\nTrainable parameters: {n_unet + n_encoder:,} "
           f"(UNet {n_unet:,}, SNP encoder {n_encoder:,})")
 
-    optimizer = optim.Adam([
-        {'params': ldm.unet.parameters(), 'lr': cfg.learning_rate},
-        {'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate},
-    ])
+    groups = [{'params': ldm.unet.parameters(), 'lr': cfg.learning_rate}]
+    if windows:
+        groups += [{'params': [p for n, p in ldm.snp_encoder.named_parameters() if n != 'log_alpha'],
+                    'lr': cfg.snp_encoder_learning_rate},
+                   {'params': [ldm.snp_encoder.log_alpha], 'lr': cfg.window_gate_learning_rate}]
+    else:
+        groups += [{'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate}]
+    optimizer = optim.Adam(groups)
 
     if resume_ckpt is not None:
         optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
@@ -619,14 +695,25 @@ def main():
             snp = batch['snp'].to(device, non_blocking=True)
 
             loss = ldm(images, snp)
+            objective = loss
+            if windows:
+                objective = loss + cfg.window_sparsity * snp_encoder.expected_open()
             optimizer.zero_grad()
-            loss.backward()
+            objective.backward()
             torch.nn.utils.clip_grad_norm_(ldm.unet.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(ldm.snp_encoder.parameters(), 1.0)
             optimizer.step()
+            # The denoising loss alone, so the curve stays comparable with PCA runs.
             total += loss.item()
 
         train_loss = total / max(len(train_loader), 1)
+        window_stats = {}
+        if windows:
+            snp_encoder.eval()
+            with torch.no_grad():
+                window_stats = {'windows_open': int((snp_encoder.gates() > 0).sum().item()),
+                                'windows_expected_open': float(snp_encoder.expected_open().item())}
+            set_train_mode()
 
         val_loss, val_wrong, val_gain = evaluate('val', val_loader)
         train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader)
@@ -638,10 +725,11 @@ def main():
                         'train_eval_loss_wrong_genotype': train_wrong,
                         'genotype_gain_heldout': val_gain,
                         'genotype_gain_trained': train_gain,
-                        'lr': lr_scheduler.get_last_lr()[0]})
+                        'lr': lr_scheduler.get_last_lr()[0], **window_stats})
         print(f"  train {train_loss:.4f}   val {val_loss:.4f}   "
               f"genotype gain: held-out {val_gain:+.1%}, trained {train_gain:+.1%}   "
-              f"lr {lr_scheduler.get_last_lr()[0]:.2e}")
+              f"lr {lr_scheduler.get_last_lr()[0]:.2e}"
+              + (f"   windows open {window_stats['windows_open']}/{projector.n_windows}" if windows else ''))
 
         def checkpoint(path, note):
             torch.save({
@@ -657,7 +745,8 @@ def main():
                 'snp_projector': projector.state_dict(),
                 'snp_encoder_config': encoder_config,
                 'unet_config': unet_config,
-                'encoding': 'one_hot_founders',
+                'encoding': 'founder_windows' if windows else 'one_hot_founders',
+                'window_sparsity': cfg.window_sparsity if windows else None,
                 'founders': list(founders),
                 'val_genotypes': sorted(val_genotypes),
                 'model_size': size,
@@ -670,6 +759,10 @@ def main():
 
         if (epoch + 1) % cfg.save_every == 0:
             checkpoint(checkpoint_path(save_dir, epoch + 1, run_name), 'periodic')
+            if windows:
+                n_open = save_gate_report(snp_encoder, projector,
+                                          results_dir / f'window_gates_epoch_{epoch + 1:04d}.csv')
+                print(f"  {n_open} windows open; gate report written")
             if cfg.save_previews and preview_samples:
                 save_previews(epoch + 1)
         if val_loss < best_val:
@@ -688,8 +781,11 @@ def main():
             'dataset': 'seeds',
             'model_size': size, 'unet_parameters': n_unet,
             'snp_encoder_parameters': n_encoder,
-            'encoding': 'one_hot_founders', 'founders': list(founders),
+            'encoding': 'founder_windows' if windows else 'one_hot_founders',
+            'founders': list(founders),
             'projected_dim': int(projector.output_dim),
+            'window_size': cfg.window_size if windows else None,
+            'window_sparsity': cfg.window_sparsity if windows else None,
             'warm_start': str(cfg.warm_start_checkpoint),
             'resumed_from': str(resume_path) if resume_path else None,
             'started_at_epoch': start_epoch,

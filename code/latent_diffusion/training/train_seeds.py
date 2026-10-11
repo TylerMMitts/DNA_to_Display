@@ -209,13 +209,26 @@ def find_resumable_checkpoint(save_dir, run_name):
 
 
 # diffusion_seeds_<size>, with the window settings appended when the window
-# encoding is used - diffusion_seeds_medium_windows200_sp1e-04 - so a window run
-# never resumes from or overwrites the PCA model's checkpoints.
-def default_run_name(size, encoding, window_size, window_sparsity):
+# encoding is used - diffusion_seeds_medium_windows200_sp1e-04_wu100r100 - so a
+# window run never resumes from or overwrites the PCA model's checkpoints, or a
+# window run with a different penalty schedule.
+def default_run_name(size, encoding, window_size, window_sparsity, warmup=0, ramp=0):
     name = f'{MODEL_NAME}_{size}'
     if encoding == 'windows':
         name += f'_windows{window_size}_sp{window_sparsity:.0e}'
+        if warmup or ramp:
+            name += f'_wu{warmup}r{ramp}'
     return name
+
+
+# The sparsity penalty's weight in a given epoch (0-based): nothing during the
+# warm-up, then rising linearly to full strength over the ramp.
+def penalty_weight(epoch, full, warmup, ramp):
+    if epoch < warmup:
+        return 0.0
+    if ramp and epoch < warmup + ramp:
+        return full * (epoch - warmup + 1) / ramp
+    return full
 
 
 # Gate report: one row per window, its genes and how open its gate is. Written
@@ -258,9 +271,23 @@ def main(overrides=None):
         # this. Larger -> fewer windows. DIFFUSION_WINDOW_SPARSITY overrides it;
         # 3e-5, 1e-4 and 3e-4 bracket a sensible range.
         window_sparsity = float(os.environ.get('DIFFUSION_WINDOW_SPARSITY', 1e-4))
-        # The gates need a faster rate than the network: at the encoder's 1e-4 a
-        # gate would take thousands of epochs to close.
-        window_gate_learning_rate = 1e-2
+        # Penalty schedule. With the full penalty from the first step every gate
+        # shut by epoch 16 (windows200_sp1e-04, the first run), while the model
+        # was still learning to draw a kernel and used no genotype at all; a shut
+        # gate cannot reopen. Genotype use builds over hundreds of epochs (the
+        # PCA root model's trained gain was 0.14% at epoch 25, ~0.9% at 300), so:
+        #   - warm-up: every gate held fully open, no penalty, for this many epochs
+        #   - ramp: the penalty then rises from 0 to window_sparsity over this many
+        # DIFFUSION_WINDOW_WARMUP and DIFFUSION_WINDOW_RAMP override them.
+        window_warmup_epochs = int(os.environ.get('DIFFUSION_WINDOW_WARMUP', 100))
+        window_ramp_epochs = int(os.environ.get('DIFFUSION_WINDOW_RAMP', 100))
+        # Faster than the network's 1e-4 so gates can settle, slow enough that
+        # closing takes tens of epochs and shows in the log (1e-2 closed them in
+        # about ten).
+        window_gate_learning_rate = 1e-3
+        # Warn when more than this share of gates is shut before the ramp ends:
+        # the sign of the collapse above.
+        window_collapse_warning = 0.9
 
         # None -> diffusion_seeds_<size>, plus the window settings for a window run.
         run_name = None
@@ -335,7 +362,8 @@ def main(overrides=None):
     windows = cfg.encoding == 'windows'
     preset = SIZE_PRESETS[size]
     run_name = cfg.run_name or default_run_name(size, cfg.encoding, cfg.window_size,
-                                                cfg.window_sparsity)
+                                                cfg.window_sparsity, cfg.window_warmup_epochs,
+                                                cfg.window_ramp_epochs)
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -371,6 +399,13 @@ def main(overrides=None):
         if saved_encoding != cfg.encoding:
             raise SystemExit(f"{resume_path.name} was trained with encoding={saved_encoding!r}, "
                              f"not {cfg.encoding!r}. Give this run its own run_name.")
+        if windows:
+            saved = (resume_ckpt.get('window_sparsity'), resume_ckpt.get('window_warmup_epochs', 0),
+                     resume_ckpt.get('window_ramp_epochs', 0))
+            if saved != (cfg.window_sparsity, cfg.window_warmup_epochs, cfg.window_ramp_epochs):
+                raise SystemExit(f"{resume_path.name} was trained with sparsity, warm-up and ramp "
+                                 f"{saved}, not {(cfg.window_sparsity, cfg.window_warmup_epochs, cfg.window_ramp_epochs)}. "
+                                 "Give this run its own run_name.")
         # Reuses the exact basis already in use rather than refitting
         founders = tuple(resume_ckpt['founders'])
         projector = (WindowProjector if windows else SNPProjector).from_state_dict(
@@ -388,7 +423,8 @@ def main(overrides=None):
             projector = WindowProjector(founders, cfg.window_size).fit(snp_matrix, snp_names)
             print(f"\nFounder windows: {projector.n_windows} windows of {cfg.window_size} genes "
                   f"x {len(founders)} founders = {projector.output_dim} features, "
-                  f"sparsity {cfg.window_sparsity:g} per open window")
+                  f"sparsity {cfg.window_sparsity:g} per open window after a "
+                  f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp")
         else:
             print("\nFitting one-hot PCA projection...")
             t0 = time.time()
@@ -687,17 +723,22 @@ def main(overrides=None):
         true_loss, wrong_loss = true_total / n, wrong_total / n
         return true_loss, wrong_loss, wrong_loss / true_loss - 1.0
 
+    collapse_warned = False
     for epoch in range(start_epoch, cfg.num_epochs):
         set_train_mode()
         total = 0.0
+        if windows:
+            snp_encoder.force_open = epoch < cfg.window_warmup_epochs
+            weight = penalty_weight(epoch, cfg.window_sparsity, cfg.window_warmup_epochs,
+                                    cfg.window_ramp_epochs)
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
             images = batch['image'].to(device, non_blocking=True)
             snp = batch['snp'].to(device, non_blocking=True)
 
             loss = ldm(images, snp)
             objective = loss
-            if windows:
-                objective = loss + cfg.window_sparsity * snp_encoder.expected_open()
+            if windows and weight > 0:
+                objective = loss + weight * snp_encoder.expected_open()
             optimizer.zero_grad()
             objective.backward()
             torch.nn.utils.clip_grad_norm_(ldm.unet.parameters(), 1.0)
@@ -712,8 +753,17 @@ def main(overrides=None):
             snp_encoder.eval()
             with torch.no_grad():
                 window_stats = {'windows_open': int((snp_encoder.gates() > 0).sum().item()),
-                                'windows_expected_open': float(snp_encoder.expected_open().item())}
+                                'windows_expected_open': float(snp_encoder.expected_open().item()),
+                                'window_penalty': weight}
             set_train_mode()
+            shut = 1 - window_stats['windows_open'] / projector.n_windows
+            if (not collapse_warned and epoch < cfg.window_warmup_epochs + cfg.window_ramp_epochs
+                    and shut > cfg.window_collapse_warning):
+                collapse_warned = True
+                print(f"  WARNING: {shut:.0%} of window gates are shut at epoch {epoch + 1}, before "
+                      "the penalty ramp has finished. Closed gates cannot reopen, so if the "
+                      "genotype gain is near zero this run has collapsed: lower "
+                      "window_sparsity or lengthen the warm-up and ramp.")
 
         val_loss, val_wrong, val_gain = evaluate('val', val_loader)
         train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader)
@@ -729,7 +779,8 @@ def main(overrides=None):
         print(f"  train {train_loss:.4f}   val {val_loss:.4f}   "
               f"genotype gain: held-out {val_gain:+.1%}, trained {train_gain:+.1%}   "
               f"lr {lr_scheduler.get_last_lr()[0]:.2e}"
-              + (f"   windows open {window_stats['windows_open']}/{projector.n_windows}" if windows else ''))
+              + (f"   windows open {window_stats['windows_open']}/{projector.n_windows}"
+                 f"   penalty {weight:.1e}" if windows else ''))
 
         def checkpoint(path, note):
             torch.save({
@@ -747,6 +798,8 @@ def main(overrides=None):
                 'unet_config': unet_config,
                 'encoding': 'founder_windows' if windows else 'one_hot_founders',
                 'window_sparsity': cfg.window_sparsity if windows else None,
+                'window_warmup_epochs': cfg.window_warmup_epochs if windows else None,
+                'window_ramp_epochs': cfg.window_ramp_epochs if windows else None,
                 'founders': list(founders),
                 'val_genotypes': sorted(val_genotypes),
                 'model_size': size,
@@ -786,6 +839,8 @@ def main(overrides=None):
             'projected_dim': int(projector.output_dim),
             'window_size': cfg.window_size if windows else None,
             'window_sparsity': cfg.window_sparsity if windows else None,
+            'window_warmup_epochs': cfg.window_warmup_epochs if windows else None,
+            'window_ramp_epochs': cfg.window_ramp_epochs if windows else None,
             'warm_start': str(cfg.warm_start_checkpoint),
             'resumed_from': str(resume_path) if resume_path else None,
             'started_at_epoch': start_epoch,

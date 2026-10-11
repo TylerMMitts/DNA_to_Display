@@ -7,10 +7,13 @@
 #   2  sparsity 3e-4   keeps fewer windows
 #
 # All use windows of 200 genes and the same 93 held-out lines as the PCA seed
-# model, so results compare directly with diffusion_seeds_medium. Each run has
-# its own folder (models/diffusion_seeds_medium_windows200_sp1e-04, ...) and a
+# model, so results compare directly with diffusion_seeds_medium. The penalty
+# is off for the first 100 epochs (every gate held open) and ramps to full over
+# the next 100; train_seeds.py explains why. Each run has its own folder
+# (models/diffusion_seeds_medium_windows200_sp1e-04_wu100r100, ...) and a
 # window_gates_epoch_N.csv per checkpoint in results/training/<run>/ listing
-# which windows are still open.
+# which windows are still open. In the log, windows open should fall to a small
+# number above zero during the ramp; a warning is printed if nearly all shut.
 #
 # Same environment as train_seeds_hellbender.sbatch. From the project root:
 #     mkdir -p results/training/slurm
@@ -44,7 +47,10 @@ if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "$VENV/bin/activate" ]; then
   source "$VENV/bin/activate"
 fi
 
-echo "windows of $DIFFUSION_WINDOW_SIZE, sparsity $DIFFUSION_WINDOW_SPARSITY   node: $(hostname)   job: ${SLURM_JOB_ID:-none}"
+export DIFFUSION_WINDOW_WARMUP=100
+export DIFFUSION_WINDOW_RAMP=100
+
+echo "windows of $DIFFUSION_WINDOW_SIZE, sparsity $DIFFUSION_WINDOW_SPARSITY, warm-up $DIFFUSION_WINDOW_WARMUP, ramp $DIFFUSION_WINDOW_RAMP   node: $(hostname)   job: ${SLURM_JOB_ID:-none}"
 nvidia-smi -L
 
 python - <<'PYCHECK'

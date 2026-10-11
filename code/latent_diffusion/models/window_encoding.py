@@ -113,6 +113,11 @@ class GatedWindowEncoder(nn.Module):
         # One gate per window. Starts mostly open, so the model sees every region
         # before the penalty starts closing the ones it does not need.
         self.log_alpha = nn.Parameter(torch.full((self.n_windows,), math.log(init_open / (1 - init_open))))
+        # True holds every gate at exactly 1, in training and eval, and leaves the
+        # gates untouched. The trainer sets it for its penalty-free warm-up, so the
+        # model learns to use the genotype before any window can close. Not saved:
+        # a loaded checkpoint always uses its learned gates.
+        self.force_open = False
         input_dim = self.n_windows * self.n_founders
         # The same MLP as OneHotSNPEncoder.
         self.net = nn.Sequential(
@@ -125,6 +130,8 @@ class GatedWindowEncoder(nn.Module):
     # Sampled in training (one draw per batch); deterministic in eval, where a
     # gate whose open probability is low enough is exactly 0.
     def gates(self):
+        if self.force_open:
+            return torch.ones_like(self.log_alpha)
         if self.training:
             u = torch.rand_like(self.log_alpha).clamp(1e-6, 1 - 1e-6)
             s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.log_alpha) / BETA)

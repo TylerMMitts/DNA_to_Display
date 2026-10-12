@@ -34,6 +34,16 @@ def main(overrides=None):
         # outside a Slurm job anyway.
         allow_outside_slurm = False
 
+        # 'pca' as the real model, or 'windows' for the founder-window encoder
+        # (train_onehot.py). A window run gets its own folder, named with its
+        # settings, so it never mixes with the PCA planted-gene run. The
+        # DIFFUSION_* environment variables override these, as in train_onehot.py.
+        encoding = os.environ.get('DIFFUSION_ENCODING', 'pca')
+        window_size = int(os.environ.get('DIFFUSION_WINDOW_SIZE', 200))
+        window_sparsity = float(os.environ.get('DIFFUSION_WINDOW_SPARSITY', 1e-4))
+        window_warmup_epochs = int(os.environ.get('DIFFUSION_WINDOW_WARMUP', 100))
+        window_ramp_epochs = int(os.environ.get('DIFFUSION_WINDOW_RAMP', 100))
+
     apply_overrides(cfg, overrides)
 
     if not cfg.allow_outside_slurm and 'SLURM_JOB_ID' not in os.environ:
@@ -44,11 +54,23 @@ def main(overrides=None):
 
     parquet = resolve_input(Path(cfg.snp_dir) / f'MEMA_gene_matrix_synthetic_stele_k{cfg.block_size}.parquet',
                             'synthetic SNP table (run build_synthetic_snps.py first)')
-    print(f"Synthetic SNP table: {parquet}\nRun: {cfg.run_name}\n")
 
     from latent_diffusion.training import train_onehot
-    train_onehot.main({'snp_parquet': parquet, 'run_name': cfg.run_name,
-                       'model_size': cfg.model_size})
+    window = {'encoding': cfg.encoding, 'window_size': cfg.window_size,
+              'window_sparsity': cfg.window_sparsity,
+              'window_warmup_epochs': cfg.window_warmup_epochs,
+              'window_ramp_epochs': cfg.window_ramp_epochs}
+    run_name = cfg.run_name
+    if cfg.encoding == 'windows':
+        # The real model's naming, with this run's name in place of its own.
+        full = train_onehot.default_run_name(cfg.model_size, encoding='windows', window_size=cfg.window_size,
+                                             window_sparsity=cfg.window_sparsity,
+                                             warmup=cfg.window_warmup_epochs, ramp=cfg.window_ramp_epochs)
+        run_name = cfg.run_name + full[len(f'{train_onehot.MODEL_NAME}_{cfg.model_size}'):]
+    print(f"Synthetic SNP table: {parquet}\nRun: {run_name}\n")
+
+    train_onehot.main({'snp_parquet': parquet, 'run_name': run_name,
+                       'model_size': cfg.model_size, **window})
 
 
 if __name__ == '__main__':

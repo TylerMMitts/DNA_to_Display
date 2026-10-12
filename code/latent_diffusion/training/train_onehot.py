@@ -35,6 +35,9 @@ from paths import (
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.snp_encoder import load_snp_data_from_parquet
 from latent_diffusion.models.snp_encoding import SNPProjector, OneHotSNPEncoder
+from latent_diffusion.models.window_encoding import (
+    GatedWindowEncoder, WindowProjector, file_gene_order, penalty_weight, save_gate_report,
+)
 from latent_diffusion.models.unet import DenoisingUNet
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
@@ -209,21 +212,27 @@ def warm_start_unet(unet, checkpoint_path, device):
     return unet
 
 
-# Finds the newest checkpoint to resume from, or None if the folder holds none.
-# paths.find_latest_checkpoint raises when there is nothing to load, which is a
-# normal first run here rather than an error.
 # diffusion_onehot_<size>, with the experiment settings appended when they are
-# not the defaults - diffusion_onehot_medium_lines50, ..._cnoise0p5 - so an
-# experiment never resumes from or overwrites the real model's checkpoints.
-def default_run_name(size, n_train_genotypes=None, condition_noise=0.0):
+# not the defaults - diffusion_onehot_medium_lines50, ..._cnoise0p5,
+# ..._windows200_sp1e-04_wu100r100 - so an experiment never resumes from or
+# overwrites the real model's checkpoints.
+def default_run_name(size, n_train_genotypes=None, condition_noise=0.0, encoding='pca',
+                     window_size=200, window_sparsity=1e-4, warmup=0, ramp=0):
     name = f'{MODEL_NAME}_{size}'
     if n_train_genotypes is not None:
         name += f'_lines{n_train_genotypes}'
     if condition_noise:
         name += '_cnoise' + f'{condition_noise:g}'.replace('.', 'p')
+    if encoding == 'windows':
+        name += f'_windows{window_size}_sp{window_sparsity:.0e}'
+        if warmup or ramp:
+            name += f'_wu{warmup}r{ramp}'
     return name
 
 
+# Finds the newest checkpoint to resume from, or None if the folder holds none.
+# paths.find_latest_checkpoint raises when there is nothing to load, which is a
+# normal first run here rather than an error.
 def find_resumable_checkpoint(save_dir, run_name):
     try:
         return find_latest_checkpoint(save_dir, run_name)
@@ -270,6 +279,24 @@ def main(overrides=None):
         # every analysis script see exact genotypes. 0 -> none. The
         # DIFFUSION_CONDITION_NOISE environment variable overrides it.
         condition_noise = 0.0
+
+        # How the genotype reaches the encoder (see window_encoding.py):
+        #   'pca'     - one-hot founders compressed by PCA, as every model so far
+        #   'windows' - founder shares in windows of neighbouring genes, each
+        #               behind a learned gate that a sparsity penalty pushes shut
+        # For roots the windows follow the parquet's row order, which is the
+        # genome order (the loaded column order, by gene ID, is not), and are cut
+        # at the chromosome boundaries the data itself shows. Settings as in
+        # train_seeds.py, where the warm-up and ramp are explained. The
+        # DIFFUSION_ENCODING / _WINDOW_SIZE / _WINDOW_SPARSITY / _WINDOW_WARMUP /
+        # _WINDOW_RAMP environment variables override them.
+        encoding = 'pca'
+        window_size = 200
+        window_sparsity = 1e-4
+        window_warmup_epochs = 100
+        window_ramp_epochs = 100
+        window_gate_learning_rate = 1e-3
+        window_collapse_warning = 0.9
 
         # Saves sample images for preview during training
         save_previews = True
@@ -331,12 +358,27 @@ def main(overrides=None):
         cfg.condition_noise = float(os.environ['DIFFUSION_CONDITION_NOISE'])
     if cfg.condition_noise < 0:
         raise SystemExit("condition_noise cannot be negative")
+    for env, key, cast in (('DIFFUSION_ENCODING', 'encoding', str),
+                           ('DIFFUSION_WINDOW_SIZE', 'window_size', int),
+                           ('DIFFUSION_WINDOW_SPARSITY', 'window_sparsity', float),
+                           ('DIFFUSION_WINDOW_WARMUP', 'window_warmup_epochs', int),
+                           ('DIFFUSION_WINDOW_RAMP', 'window_ramp_epochs', int)):
+        if os.environ.get(env):
+            setattr(cfg, key, cast(os.environ[env]))
+    if cfg.encoding not in ('pca', 'windows'):
+        raise SystemExit(f"encoding must be 'pca' or 'windows', not {cfg.encoding!r}")
+    windows = cfg.encoding == 'windows'
+    if windows and cfg.condition_noise:
+        raise SystemExit("condition_noise is defined on PCA components; it is not used "
+                         "with encoding='windows'")
 
     size = os.environ.get('DIFFUSION_SIZE', cfg.model_size)
     if size not in SIZE_PRESETS:
         raise SystemExit(f"unknown model size {size!r}; choose one of {list(SIZE_PRESETS)}")
     preset = SIZE_PRESETS[size]
-    run_name = cfg.run_name or default_run_name(size, cfg.n_train_genotypes, cfg.condition_noise)
+    run_name = cfg.run_name or default_run_name(
+        size, cfg.n_train_genotypes, cfg.condition_noise, cfg.encoding, cfg.window_size,
+        cfg.window_sparsity, cfg.window_warmup_epochs, cfg.window_ramp_epochs)
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -368,9 +410,20 @@ def main(overrides=None):
     snp_matrix = np.asarray(snp_matrix)
 
     if resume_ckpt is not None:
+        saved_encoding = 'windows' if resume_ckpt.get('encoding') == 'founder_windows' else 'pca'
+        if saved_encoding != cfg.encoding:
+            raise SystemExit(f"{resume_path.name} was trained with encoding={saved_encoding!r}, "
+                             f"not {cfg.encoding!r}. Give this run its own run_name.")
+        if windows:
+            saved = (resume_ckpt.get('window_sparsity'), resume_ckpt.get('window_warmup_epochs'),
+                     resume_ckpt.get('window_ramp_epochs'))
+            if saved != (cfg.window_sparsity, cfg.window_warmup_epochs, cfg.window_ramp_epochs):
+                raise SystemExit(f"{resume_path.name} was trained with sparsity, warm-up and ramp "
+                                 f"{saved}. Give this run its own run_name.")
         # Reuses the exact basis already in use rather than refitting
         founders = tuple(resume_ckpt['founders'])
-        projector = SNPProjector.from_state_dict(resume_ckpt['snp_projector'])
+        projector = (WindowProjector if windows else SNPProjector).from_state_dict(
+            resume_ckpt['snp_projector'])
         print(f"Founders: {founders}")
         print(f"Restored SNP projector from checkpoint: "
               f"{projector.output_dim} dimensions")
@@ -380,13 +433,24 @@ def main(overrides=None):
             founders = tuple(sorted(int(v) for v in np.unique(snp_matrix) if v > 0))
         print(f"Founders: {founders}")
 
-        print("\nFitting one-hot PCA projection...")
-        t0 = time.time()
-        projector = SNPProjector(founders=founders,
-                                 target_variance=cfg.pca_target_variance,
-                                 random_state=cfg.pca_random_state).fit(snp_matrix)
-        print(f"  projected to {projector.output_dim} dimensions "
-              f"in {time.time() - t0:.1f}s")
+        if windows:
+            projector = WindowProjector(founders, cfg.window_size).fit(
+                snp_matrix, snp_names,
+                gene_order=file_gene_order(resolve_input(cfg.snp_parquet, 'SNP parquet')),
+                split_chromosomes=True)
+            n_segments = len(set(projector.segment_of_window))
+            print(f"\nFounder windows in genome order: {projector.n_windows} windows of up to "
+                  f"{cfg.window_size} genes over {n_segments} chromosome segments, "
+                  f"{projector.output_dim} features; sparsity {cfg.window_sparsity:g} after a "
+                  f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp")
+        else:
+            print("\nFitting one-hot PCA projection...")
+            t0 = time.time()
+            projector = SNPProjector(founders=founders,
+                                     target_variance=cfg.pca_target_variance,
+                                     random_state=cfg.pca_random_state).fit(snp_matrix)
+            print(f"  projected to {projector.output_dim} dimensions "
+                  f"in {time.time() - t0:.1f}s")
 
     projected = projector.transform(snp_matrix)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(sample_names)}
@@ -492,12 +556,19 @@ def main(overrides=None):
         batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers,
         pin_memory=torch.cuda.is_available())
 
-    encoder_config = {
-        'input_dim': projector.output_dim,
-        'embedding_dim': preset['snp_embed_dim'],
-        'num_tokens': cfg.num_tokens,
-        'hidden_dim': preset['encoder_hidden_dim'],
-    }
+    if windows:
+        encoder_config = {
+            'n_windows': projector.n_windows, 'n_founders': len(founders),
+            'embedding_dim': preset['snp_embed_dim'], 'num_tokens': cfg.num_tokens,
+            'hidden_dim': preset['encoder_hidden_dim'], 'init_open': 0.9,
+        }
+    else:
+        encoder_config = {
+            'input_dim': projector.output_dim,
+            'embedding_dim': preset['snp_embed_dim'],
+            'num_tokens': cfg.num_tokens,
+            'hidden_dim': preset['encoder_hidden_dim'],
+        }
     unet_config = {
         'latent_channels': cfg.latent_channels, 'base_channels': preset['base_channels'],
         'snp_embed_dim': preset['snp_embed_dim'], 'd_attention': preset['d_attention'],
@@ -515,7 +586,7 @@ def main(overrides=None):
                 f"  checkpoint: {saved_unet}\n  preset:     {unet_config}\n"
                 "Restore the preset, or move that folder's checkpoints aside to start over.")
 
-    snp_encoder = OneHotSNPEncoder(**encoder_config).to(device)
+    snp_encoder = (GatedWindowEncoder if windows else OneHotSNPEncoder)(**encoder_config).to(device)
     unet = DenoisingUNet(**unet_config).to(device)
 
     if resume_ckpt is not None:
@@ -553,10 +624,14 @@ def main(overrides=None):
     print(f"\nTrainable parameters: {n_unet + n_encoder:,} "
           f"(UNet {n_unet:,}, SNP encoder {n_encoder:,})")
 
-    optimizer = optim.Adam([
-        {'params': ldm.unet.parameters(), 'lr': cfg.learning_rate},
-        {'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate},
-    ])
+    groups = [{'params': ldm.unet.parameters(), 'lr': cfg.learning_rate}]
+    if windows:
+        groups += [{'params': [p for n, p in ldm.snp_encoder.named_parameters() if n != 'log_alpha'],
+                    'lr': cfg.snp_encoder_learning_rate},
+                   {'params': [ldm.snp_encoder.log_alpha], 'lr': cfg.window_gate_learning_rate}]
+    else:
+        groups += [{'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate}]
+    optimizer = optim.Adam(groups)
 
     if resume_ckpt is not None:
         optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
@@ -693,9 +768,14 @@ def main(overrides=None):
         true_loss, wrong_loss = true_total / n, wrong_total / n
         return true_loss, wrong_loss, wrong_loss / true_loss - 1.0
 
+    collapse_warned = False
     for epoch in range(start_epoch, cfg.num_epochs):
         set_train_mode()
         total = 0.0
+        if windows:
+            snp_encoder.force_open = epoch < cfg.window_warmup_epochs
+            weight = penalty_weight(epoch, cfg.window_sparsity, cfg.window_warmup_epochs,
+                                    cfg.window_ramp_epochs)
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
             images = batch['image'].to(device, non_blocking=True)
             snp = batch['snp'].to(device, non_blocking=True)
@@ -703,8 +783,11 @@ def main(overrides=None):
                 snp = snp + cfg.condition_noise * component_spread * torch.randn_like(snp)
 
             loss = ldm(images, snp)
+            objective = loss
+            if windows and weight > 0:
+                objective = loss + weight * snp_encoder.expected_open()
             optimizer.zero_grad()
-            loss.backward()
+            objective.backward()
             torch.nn.utils.clip_grad_norm_(ldm.unet.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(ldm.snp_encoder.parameters(), 1.0)
             optimizer.step()
@@ -715,6 +798,23 @@ def main(overrides=None):
         val_loss, val_wrong, val_gain = evaluate('val', val_loader)
         train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader)
 
+        window_stats = {}
+        if windows:
+            snp_encoder.eval()
+            with torch.no_grad():
+                window_stats = {'windows_open': int((snp_encoder.gates() > 0).sum().item()),
+                                'windows_expected_open': float(snp_encoder.expected_open().item()),
+                                'window_penalty': weight}
+            set_train_mode()
+            shut = 1 - window_stats['windows_open'] / projector.n_windows
+            if (not collapse_warned and epoch < cfg.window_warmup_epochs + cfg.window_ramp_epochs
+                    and shut > cfg.window_collapse_warning):
+                collapse_warned = True
+                print(f"  WARNING: {shut:.0%} of window gates are shut at epoch {epoch + 1}, before "
+                      "the penalty ramp has finished. Closed gates cannot reopen, so if the "
+                      "genotype gain is near zero this run has collapsed: lower "
+                      "window_sparsity or lengthen the warm-up and ramp.")
+
         lr_scheduler.step()
         history.append({'epoch': epoch + 1, 'train_loss': train_loss,
                         'val_loss': val_loss, 'val_loss_wrong_genotype': val_wrong,
@@ -722,10 +822,12 @@ def main(overrides=None):
                         'train_eval_loss_wrong_genotype': train_wrong,
                         'genotype_gain_heldout': val_gain,
                         'genotype_gain_trained': train_gain,
-                        'lr': lr_scheduler.get_last_lr()[0]})
+                        'lr': lr_scheduler.get_last_lr()[0], **window_stats})
         print(f"  train {train_loss:.4f}   val {val_loss:.4f}   "
               f"genotype gain: held-out {val_gain:+.1%}, trained {train_gain:+.1%}   "
-              f"lr {lr_scheduler.get_last_lr()[0]:.2e}")
+              f"lr {lr_scheduler.get_last_lr()[0]:.2e}"
+              + (f"   windows open {window_stats['windows_open']}/{projector.n_windows}"
+                 f"   penalty {weight:.1e}" if windows else ''))
 
         def checkpoint(path, note):
             torch.save({
@@ -741,7 +843,10 @@ def main(overrides=None):
                 'snp_projector': projector.state_dict(),
                 'snp_encoder_config': encoder_config,
                 'unet_config': unet_config,
-                'encoding': 'one_hot_founders',
+                'encoding': 'founder_windows' if windows else 'one_hot_founders',
+                'window_sparsity': cfg.window_sparsity if windows else None,
+                'window_warmup_epochs': cfg.window_warmup_epochs if windows else None,
+                'window_ramp_epochs': cfg.window_ramp_epochs if windows else None,
                 'founders': list(founders),
                 'val_genotypes': sorted(val_genotypes),
                 # The lines it trained on, which is every line outside the split
@@ -755,6 +860,10 @@ def main(overrides=None):
 
         if (epoch + 1) % cfg.save_every == 0:
             checkpoint(checkpoint_path(save_dir, epoch + 1, run_name), 'periodic')
+            if windows:
+                n_open = save_gate_report(snp_encoder, projector,
+                                          results_dir / f'window_gates_epoch_{epoch + 1:04d}.csv')
+                print(f"  {n_open} windows open; gate report written")
             if cfg.save_previews and preview_samples:
                 save_previews(epoch + 1)
         if val_loss < best_val:
@@ -771,8 +880,13 @@ def main(overrides=None):
     with open(results_dir / 'run_summary.json', 'w') as f:
         json.dump({
             'model_size': size, 'unet_parameters': n_unet, 'snp_encoder_parameters': n_encoder,
-            'encoding': 'one_hot_founders', 'founders': list(founders),
+            'encoding': 'founder_windows' if windows else 'one_hot_founders',
+            'founders': list(founders),
             'projected_dim': int(projector.output_dim),
+            'window_size': cfg.window_size if windows else None,
+            'window_sparsity': cfg.window_sparsity if windows else None,
+            'window_warmup_epochs': cfg.window_warmup_epochs if windows else None,
+            'window_ramp_epochs': cfg.window_ramp_epochs if windows else None,
             'warm_start': str(cfg.warm_start_checkpoint),
             'resumed_from': str(resume_path) if resume_path else None,
             'started_at_epoch': start_epoch,

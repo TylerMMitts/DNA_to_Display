@@ -40,21 +40,55 @@ class WindowProjector:
 
     kind = 'founder_windows'
 
-    def __init__(self, founders, window_size=200, n_loci=None, snp_names=None):
+    # columns, when given, is the layout: one list of matrix column indices per
+    # window, in genome order. None is the seed layout - consecutive columns of
+    # the table as loaded - which suits the seed table because its B73v5 gene IDs
+    # already run along each chromosome.
+    def __init__(self, founders, window_size=200, n_loci=None, snp_names=None, columns=None,
+                 segment_of_window=None):
         self.founders = tuple(int(f) for f in founders)
         self.window_size = int(window_size)
         self.n_loci = n_loci
         self.snp_names = list(snp_names) if snp_names is not None else None
+        self.columns = [list(map(int, c)) for c in columns] if columns is not None else None
+        self.segment_of_window = list(segment_of_window) if segment_of_window is not None else None
+        self._index = None
 
-    def fit(self, snp_matrix, snp_names=None):
-        self.n_loci = int(np.asarray(snp_matrix).shape[1])
+    # gene_order: gene names in genome order, for a table whose loaded column
+    # order is not genomic (the root table, see file_gene_order). With
+    # split_chromosomes, windows are also cut wherever neighbouring loci stop
+    # sharing founders (chromosome_breaks), so no window spans two chromosomes.
+    def fit(self, snp_matrix, snp_names=None, gene_order=None, split_chromosomes=False):
+        snp_matrix = np.asarray(snp_matrix)
+        self.n_loci = int(snp_matrix.shape[1])
         if snp_names is not None:
             self.snp_names = list(snp_names)
+        if gene_order is None and not split_chromosomes:
+            self.columns, self.segment_of_window = None, None
+            return self
+        if gene_order is not None:
+            col = {g: i for i, g in enumerate(self.snp_names)}
+            listed = set(gene_order)
+            missing = [g for g in self.snp_names if g not in listed]
+            order = [col[g] for g in gene_order if g in col] + [col[g] for g in missing]
+        else:
+            order = list(range(self.n_loci))
+        breaks = set(chromosome_breaks(snp_matrix[:, order])) if split_chromosomes else set()
+        self.columns, self.segment_of_window = [], []
+        segment, start = 0, 0
+        for i in range(len(order)):
+            end_of_segment = i in breaks or i == len(order) - 1
+            if i - start + 1 == self.window_size or end_of_segment:
+                self.columns.append(order[start:i + 1])
+                self.segment_of_window.append(segment)
+                start = i + 1
+                if i in breaks:
+                    segment += 1
         return self
 
     @property
     def n_windows(self):
-        return math.ceil(self.n_loci / self.window_size)
+        return len(self.columns) if self.columns is not None else math.ceil(self.n_loci / self.window_size)
 
     @property
     def output_dim(self):
@@ -64,11 +98,25 @@ class WindowProjector:
     def window_bounds(self):
         out = []
         for w in range(self.n_windows):
-            a, b = w * self.window_size, min((w + 1) * self.window_size, self.n_loci) - 1
+            if self.columns is not None:
+                a, b = self.columns[w][0], self.columns[w][-1]
+            else:
+                a, b = w * self.window_size, min((w + 1) * self.window_size, self.n_loci) - 1
             names = (self.snp_names[a], self.snp_names[b]) if self.snp_names else (str(a), str(b))
-            out.append({'window': w, 'first_column': a, 'last_column': b,
-                        'first_gene': names[0], 'last_gene': names[1]})
+            row = {'window': w, 'first_column': a, 'last_column': b,
+                   'first_gene': names[0], 'last_gene': names[1]}
+            if self.columns is not None:
+                row.update({'n_genes': len(self.columns[w]), 'segment': self.segment_of_window[w]})
+            out.append(row)
         return out
+
+    # (n_windows, longest window) column indices, padded with n_loci, which
+    # points at an extra uncalled (-1) column appended before gathering.
+    def _gather_index(self):
+        if self._index is None:
+            width = max(len(c) for c in self.columns)
+            self._index = np.array([c + [self.n_loci] * (width - len(c)) for c in self.columns])
+        return self._index
 
     def _padded(self, codes, lib):
         pad = self.n_windows * self.window_size - codes.shape[1]
@@ -79,7 +127,12 @@ class WindowProjector:
         return codes.reshape(codes.shape[0], self.n_windows, self.window_size)
 
     def transform(self, snp_matrix):
-        x = self._padded(np.asarray(snp_matrix, dtype=np.float32), np)
+        snp_matrix = np.asarray(snp_matrix, dtype=np.float32)
+        if self.columns is None:
+            x = self._padded(snp_matrix, np)
+        else:
+            pad = np.full((snp_matrix.shape[0], 1), -1, dtype=np.float32)
+            x = np.concatenate([snp_matrix, pad], axis=1)[:, self._gather_index()]
         called = np.maximum((x > 0).sum(axis=2), 1)
         shares = np.stack([(x == f).sum(axis=2) / called for f in self.founders], axis=2)
         return shares.reshape(shares.shape[0], -1).astype(np.float32)
@@ -87,18 +140,47 @@ class WindowProjector:
     def transform_torch(self, snp_batch):
         if snp_batch.dim() == 1:
             snp_batch = snp_batch[None, :]
-        x = self._padded(snp_batch.float(), torch)
+        snp_batch = snp_batch.float()
+        if self.columns is None:
+            x = self._padded(snp_batch, torch)
+        else:
+            pad = torch.full((snp_batch.shape[0], 1), -1.0, device=snp_batch.device)
+            index = torch.as_tensor(self._gather_index(), device=snp_batch.device)
+            x = torch.cat([snp_batch, pad], dim=1)[:, index]
         called = (x > 0).sum(dim=2).clamp(min=1).float()
         shares = torch.stack([(x == f).sum(dim=2).float() / called for f in self.founders], dim=2)
         return shares.reshape(shares.shape[0], -1)
 
     def state_dict(self):
         return {'kind': self.kind, 'founders': list(self.founders), 'window_size': self.window_size,
-                'n_loci': self.n_loci, 'snp_names': self.snp_names}
+                'n_loci': self.n_loci, 'snp_names': self.snp_names, 'columns': self.columns,
+                'segment_of_window': self.segment_of_window}
 
     @classmethod
     def from_state_dict(cls, state):
-        return cls(state['founders'], state['window_size'], state['n_loci'], state.get('snp_names'))
+        return cls(state['founders'], state['window_size'], state['n_loci'], state.get('snp_names'),
+                   state.get('columns'), state.get('segment_of_window'))
+
+
+# Genes in the order the parquet stores them, first appearance per gene. The
+# root table is stored chromosome by chromosome, but the loader pivots it to
+# gene-ID order, which is not genomic. Measured on the root table: neighbouring
+# genes share a founder in 99.7% of lines in file order (9 breaks, the 9
+# chromosome boundaries) against 99.4% in ID order (23 breaks).
+def file_gene_order(parquet_path, column='gene_model'):
+    import pandas as pd
+    return list(pd.unique(pd.read_parquet(parquet_path, columns=[column])[column]))
+
+
+# Positions i (in the given column order) where locus i and i+1 share a founder
+# in fewer than `threshold` of the lines that have both called: places where
+# neighbouring loci are no longer linked, which in genome order are the
+# chromosome boundaries (unlinked loci agree about 1 time in 8).
+def chromosome_breaks(snp_matrix, threshold=0.2):
+    x = np.asarray(snp_matrix)
+    ok = (x[:, 1:] > 0) & (x[:, :-1] > 0)
+    same = ((x[:, 1:] == x[:, :-1]) & ok).sum(0) / np.maximum(ok.sum(0), 1)
+    return [int(i) for i in np.flatnonzero(same < threshold)]
 
 
 class GatedWindowEncoder(nn.Module):
@@ -174,6 +256,36 @@ class RawCodeWindowEncoder(nn.Module):
 
     def forward(self, snp_batch):
         return self.encoder(self.projector.transform_torch(snp_batch))
+
+
+# The sparsity penalty's weight in a given epoch (0-based): nothing during the
+# warm-up, then rising linearly to full strength over the ramp. Shared by the
+# seed and root trainers.
+def penalty_weight(epoch, full, warmup, ramp):
+    if epoch < warmup:
+        return 0.0
+    if ramp and epoch < warmup + ramp:
+        return full * (epoch - warmup + 1) / ramp
+    return full
+
+
+# Gate report: one row per window, its genes and how open its gate is, most open
+# first. Returns the number of open gates.
+def save_gate_report(snp_encoder, projector, path):
+    import pandas as pd
+    with torch.no_grad():
+        prob = snp_encoder.open_probability().cpu().numpy()
+        was_training, forced = snp_encoder.training, snp_encoder.force_open
+        snp_encoder.eval()
+        snp_encoder.force_open = False
+        gate = snp_encoder.gates().cpu().numpy()
+        snp_encoder.train(was_training)
+        snp_encoder.force_open = forced
+    rows = projector.window_bounds()
+    for r, p, g in zip(rows, prob, gate):
+        r.update({'open_probability': float(p), 'gate_eval': float(g), 'open': bool(g > 0)})
+    pd.DataFrame(rows).sort_values('open_probability', ascending=False).to_csv(path, index=False)
+    return int((gate > 0).sum())
 
 
 def load_window_encoder(ckpt):

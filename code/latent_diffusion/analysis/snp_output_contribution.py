@@ -521,6 +521,11 @@ def main(overrides=None):
     snp_encoder, unet, unet_cfg = load_model(
         resolve_input(cfg.checkpoint, 'checkpoint'), snp_matrix, device)
     projector = getattr(snp_encoder, 'projector', None)
+    if getattr(projector, 'kind', None) == 'founder_windows':
+        raise SystemExit(
+            "This checkpoint uses the founder-window encoder. Contribution maps are "
+            "computed through the PCA projection, which a window model does not have, "
+            "so they are not available for it yet.")
     if projector is None:
         raise SystemExit(
             "This script needs a one-hot checkpoint: the per-locus flip is "

@@ -47,7 +47,9 @@ from paths import (
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.snp_encoder import load_seed_snp_data_from_parquet
 from latent_diffusion.models.snp_encoding import SNPProjector, OneHotSNPEncoder
-from latent_diffusion.models.window_encoding import GatedWindowEncoder, WindowProjector
+from latent_diffusion.models.window_encoding import (
+    GatedWindowEncoder, WindowProjector, penalty_weight, save_gate_report,
+)
 from latent_diffusion.models.unet import DenoisingUNet
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 from litevae.models import LiteVAEEncoder, LiteVAEDecoder
@@ -219,33 +221,6 @@ def default_run_name(size, encoding, window_size, window_sparsity, warmup=0, ram
         if warmup or ramp:
             name += f'_wu{warmup}r{ramp}'
     return name
-
-
-# The sparsity penalty's weight in a given epoch (0-based): nothing during the
-# warm-up, then rising linearly to full strength over the ramp.
-def penalty_weight(epoch, full, warmup, ramp):
-    if epoch < warmup:
-        return 0.0
-    if ramp and epoch < warmup + ramp:
-        return full * (epoch - warmup + 1) / ramp
-    return full
-
-
-# Gate report: one row per window, its genes and how open its gate is. Written
-# with every periodic checkpoint so the windows the model keeps can be followed
-# through training.
-def save_gate_report(snp_encoder, projector, path):
-    with torch.no_grad():
-        prob = snp_encoder.open_probability().cpu().numpy()
-        was_training = snp_encoder.training
-        snp_encoder.eval()
-        gate = snp_encoder.gates().cpu().numpy()
-        snp_encoder.train(was_training)
-    rows = projector.window_bounds()
-    for r, p, g in zip(rows, prob, gate):
-        r.update({'open_probability': float(p), 'gate_eval': float(g), 'open': bool(g > 0)})
-    pd.DataFrame(rows).sort_values('open_probability', ascending=False).to_csv(path, index=False)
-    return int((gate > 0).sum())
 
 
 def main(overrides=None):

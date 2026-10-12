@@ -228,8 +228,12 @@ def main(overrides=None):
     fig.savefig(out / 'dose_response.png', dpi=140)
     plt.close(fig)
 
-    # 3. Contribution maps, flipping the whole block each way.
-    if cfg.run_contribution_maps:
+    # 3. Contribution maps, flipping the whole block each way. Computed through
+    # the PCA projection, so not available for a founder-window model.
+    window_model = torch.load(checkpoint, map_location='cpu', weights_only=False).get('encoding') == 'founder_windows'
+    if cfg.run_contribution_maps and window_model:
+        print("\n3. Contribution maps skipped: not available for founder-window models yet")
+    if cfg.run_contribution_maps and not window_model:
         from latent_diffusion.analysis import snp_output_contribution
         for target in (founders[0], founders[-1]):
             print(f"\n3. Contribution map: block flipped to founder {target}")

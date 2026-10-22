@@ -60,6 +60,11 @@ WIDIV_SCALED_METADATA = WIDIV_RESULTS_DIR / f'scaled_{WIDIV_IMAGE_SIZE}_metadata
 # takes far longer than loading the cache, which is rebuilt whenever the CSV changes.
 WIDIV_GENOTYPE_CACHE = RESULTS_DIR / 'cache' / 'widiv_genotypes.npz'
 
+# Every scaled image encoded once by the frozen WiDiv LiteVAE, in all eight
+# quarter-turn and flip views, written by train_widiv.py. One file per LiteVAE
+# checkpoint, named after it, so a retrained autoencoder never reuses old latents.
+WIDIV_LATENT_CACHE_DIR = RESULTS_DIR / 'cache' / 'widiv_latents'
+
 # WiDiv gets its own autoencoder: the root LiteVAE never saw rendered images
 # (18-21 dB inside the root on them) and is fixed at 256 px.
 WIDIV_LITEVAE_DIR = MODELS_DIR / 'litevae_widiv'

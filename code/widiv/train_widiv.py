@@ -11,6 +11,12 @@
 #   - 512 px images at one common scale (prepare_widiv_images.py), so a
 #     4 x 64 x 64 latent from the WiDiv LiteVAE (train_litevae_widiv.py)
 #   - quarter turns and both flips, no colour jitter
+#   - the frozen LiteVAE encodes every image once, in all eight quarter-turn and
+#     flip views, and training reads those latents instead of re-encoding the
+#     images each step. Re-encoding was two thirds of a CPU training step (4.6 s
+#     of about 7 s per batch of 16 on a laptop). The cache keeps each latent's
+#     mean and log-variance, so every step still draws a fresh sample from the
+#     encoder's distribution exactly as encoding on the fly does.
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -45,8 +51,8 @@ from paths import (
     resolve_input, resolve_output,
 )
 from widiv_paths import (
-    WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LITEVAE_MODEL,
-    WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SPLIT,
+    WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
+    WIDIV_LITEVAE_MODEL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SPLIT,
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
@@ -156,6 +162,76 @@ def set_rng_state(device, state):
         torch.mps.set_rng_state(state['mps'])
 
 
+# The eight views augmentation can produce: no flip or a horizontal flip, each
+# turned 0-3 quarter turns. View 0 is the image as it is.
+def dihedral_views(x):
+    views = []
+    for flip in (False, True):
+        y = torch.flip(x, dims=(-1,)) if flip else x
+        for k in range(4):
+            views.append(torch.rot90(y, k, dims=(-2, -1)))
+    return views
+
+
+class CacheImageDataset(Dataset):
+
+    def __init__(self, paths):
+        self.paths = list(paths)
+        self.transform = make_transforms(False)
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        return self.transform(Image.open(self.paths[idx]).convert('RGB'))
+
+
+# Encodes every image in all eight views with the frozen LiteVAE, or loads the
+# result if this LiteVAE checkpoint has already been through it. Returns
+# filename -> row, and float16 means and log-variances of shape
+# (images, 8, channels, latent, latent), kept on the CPU.
+#
+# Keyed on the checkpoint's name, size and modification time: train_litevae_widiv.py
+# rewrites litevae_widiv_best.pt whenever validation improves, and latents from
+# an older autoencoder would not be the space the UNet is meant to learn.
+def load_or_build_latent_cache(encoder, litevae_path, image_dir, filenames, device,
+                               batch_images, num_workers):
+    litevae_path = Path(litevae_path)
+    stat = litevae_path.stat()
+    key = {'litevae': litevae_path.name, 'size': stat.st_size, 'mtime': int(stat.st_mtime)}
+    WIDIV_LATENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = WIDIV_LATENT_CACHE_DIR / f"{litevae_path.stem}_{key['size']}_{key['mtime']}.pt"
+    if path.exists():
+        cache = torch.load(path, map_location='cpu', weights_only=False)
+        if cache['key'] == key and set(filenames) <= set(cache['filenames']):
+            print(f"Latent cache: {path.name} ({len(cache['filenames'])} images x 8 views)")
+            return ({n: i for i, n in enumerate(cache['filenames'])},
+                    cache['mean'], cache['logvar'])
+
+    filenames = sorted(filenames)
+    print(f"Latent cache: encoding {len(filenames)} images x 8 views with {litevae_path.name} "
+          "(once per LiteVAE checkpoint)")
+    loader = DataLoader(CacheImageDataset(Path(image_dir) / n for n in filenames),
+                        batch_size=batch_images, shuffle=False, num_workers=num_workers)
+    means, logvars = [], []
+    t0 = time.time()
+    with torch.no_grad():
+        for images in tqdm(loader, desc='Encoding latents'):
+            views = torch.stack(dihedral_views(images.to(device)), dim=1)    # B, 8, 3, H, W
+            b = views.shape[0]
+            _, mean, logvar = encoder(views.flatten(0, 1))
+            means.append(mean.view(b, 8, *mean.shape[1:]).half().cpu())
+            logvars.append(logvar.view(b, 8, *logvar.shape[1:]).half().cpu())
+    mean, logvar = torch.cat(means), torch.cat(logvars)
+    # Written under a per-process name and moved into place, so the two split
+    # jobs building it at the same time cannot leave a half-written file.
+    tmp = path.with_suffix(f'.{os.getpid()}.tmp')
+    torch.save({'key': key, 'filenames': filenames, 'mean': mean, 'logvar': logvar}, tmp)
+    os.replace(tmp, path)
+    print(f"  {mean.numel() * 4 / 1e9:.1f} GB in {time.time() - t0:.0f}s, saved to {path}")
+    return {n: i for i, n in enumerate(filenames)}, mean, logvar
+
+
 # Finds the newest checkpoint to resume from, or None if the folder holds none.
 def find_resumable_checkpoint(save_dir, run_name):
     try:
@@ -217,6 +293,14 @@ def main(overrides=None):
         preview_latent_size = WIDIV_IMAGE_SIZE // 8
 
         resume = True
+
+        # Encode every image once (all eight views) and train from the cached
+        # latents rather than running the frozen LiteVAE every step. About 2.2 GB
+        # on disk and in memory for the 4,184 images; built on the first run for
+        # each LiteVAE checkpoint and reused by later runs and the other split.
+        cache_latents = True
+        # Images per encoding batch while building it; each becomes eight views.
+        cache_batch_images = 4
 
         latent_channels = 4
         num_tokens = 8
@@ -413,6 +497,53 @@ def main(overrides=None):
                          f"{cfg.latent_channels} x {cfg.preview_latent_size} x "
                          f"{cfg.preview_latent_size}")
 
+    if cfg.cache_latents:
+        # Every scaled image, not only this split's, so one cache serves both
+        # splits; test images are encoded but never trained on.
+        cache_row, cache_mean, cache_logvar = load_or_build_latent_cache(
+            litevae_encoder, resolve_input(cfg.litevae_checkpoint, 'WiDiv LiteVAE checkpoint'),
+            image_dir, metadata.scaled_filename.tolist(), device,
+            cfg.cache_batch_images, cfg.num_workers)
+
+        def cached_rows(samples):
+            return torch.tensor([cache_row[s['image_path'].name] for s in samples])
+
+        train_rows = cached_rows(train_samples)
+        train_snp = torch.tensor(np.stack([s['projected'] for s in train_samples]),
+                                 dtype=torch.float32)
+
+    # A sample from the encoder's distribution, as LiteVAEEncoder returns it.
+    def sample_latent(mean, logvar):
+        mean, logvar = mean.to(device).float(), logvar.to(device).float()
+        return mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
+
+    # LatentDiffusionModel.forward from an already-encoded latent.
+    def denoising_loss(z, snp):
+        t = torch.randint(0, scheduler.num_steps, (z.shape[0],), device=device)
+        noise = torch.randn_like(z)
+        z_t = scheduler.add_noise(z, noise, t)
+        return F.mse_loss(unet(z_t, t, snp_encoder(snp)), noise)
+
+    # Training batches: from the cache, a random one of the eight views per
+    # image (the same augmentation the image transforms apply); otherwise
+    # straight from the image loader, encoded on the fly.
+    def training_batches():
+        if not cfg.cache_latents:
+            for batch in train_loader:
+                yield (ldm.encode_image(batch['image'].to(device, non_blocking=True)),
+                       batch['snp'].to(device, non_blocking=True))
+            return
+        order = torch.randperm(len(train_samples))
+        for start in range(0, len(order) - cfg.batch_size + 1, cfg.batch_size):
+            idx = order[start:start + cfg.batch_size]
+            view = torch.randint(8, (len(idx),))
+            rows = train_rows[idx]
+            yield (sample_latent(cache_mean[rows, view], cache_logvar[rows, view]),
+                   train_snp[idx].to(device))
+
+    n_batches = (len(train_samples) // cfg.batch_size if cfg.cache_latents
+                 else len(train_loader))
+
     n_unet = sum(p.numel() for p in unet.parameters())
     n_encoder = sum(p.numel() for p in snp_encoder.parameters())
     print(f"\nTrainable parameters: {n_unet + n_encoder:,} "
@@ -503,16 +634,30 @@ def main(overrides=None):
     # genotype is being used as a key to recall memorised images.
     eval_cache = {}
 
-    def evaluate(name, loader):
+    def evaluate(name, loader, samples):
         ldm.eval()
         saved = get_rng_state(device)
         true_total, wrong_total, n = 0.0, 0.0, 0
         with torch.no_grad():
+            # Each image's latent drawn once, unaugmented (view 0), then reused.
             if name not in eval_cache:
                 torch.manual_seed(cfg.seed + 999)
-                eval_cache[name] = [
-                    (ldm.encode_image(b['image'].to(device)), b['snp'].to(device),
-                     b['wrong_snp'].to(device)) for b in loader]
+                if cfg.cache_latents:
+                    rows = cached_rows(samples)
+                    eval_cache[name] = []
+                    for start in range(0, len(samples), cfg.batch_size):
+                        part = samples[start:start + cfg.batch_size]
+                        r = rows[start:start + cfg.batch_size]
+                        eval_cache[name].append((
+                            sample_latent(cache_mean[r, 0], cache_logvar[r, 0]),
+                            torch.tensor(np.stack([s['projected'] for s in part]),
+                                         dtype=torch.float32, device=device),
+                            torch.tensor(np.stack([s['wrong_projected'] for s in part]),
+                                         dtype=torch.float32, device=device)))
+                else:
+                    eval_cache[name] = [
+                        (ldm.encode_image(b['image'].to(device)), b['snp'].to(device),
+                         b['wrong_snp'].to(device)) for b in loader]
             torch.manual_seed(cfg.seed + 1000)
             for _ in range(cfg.eval_repeats):
                 for z, snp, wrong_snp in eval_cache[name]:
@@ -535,20 +680,20 @@ def main(overrides=None):
     for epoch in range(start_epoch, cfg.num_epochs):
         set_train_mode()
         total = 0.0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
-            images = batch['image'].to(device, non_blocking=True)
-            snp = batch['snp'].to(device, non_blocking=True)
-            loss = ldm(images, snp)
+        for z, snp in tqdm(training_batches(), total=n_batches,
+                           desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
+            loss = denoising_loss(z, snp)
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ldm.unet.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(ldm.snp_encoder.parameters(), 1.0)
             optimizer.step()
             total += loss.item()
-        train_loss = total / max(len(train_loader), 1)
+        train_loss = total / max(n_batches, 1)
 
-        val_loss, val_wrong, val_gain = evaluate('val', val_loader)
-        train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader)
+        val_loss, val_wrong, val_gain = evaluate('val', val_loader, val_samples)
+        train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader,
+                                                       train_eval_samples)
 
         lr_scheduler.step()
         history.append({'epoch': epoch + 1, 'train_loss': train_loss,

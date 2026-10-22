@@ -109,7 +109,10 @@ class DosagePCAProjector:
             k = int(np.searchsorted(np.cumsum(ratio), self.target_variance) + 1)
         k = min(k, usable)
         s = np.sqrt(lam[:k])
-        self.components_ = ((u[:, :k].T @ z) / s[:, None]).astype(np.float32)
+        # float32 throughout: float64 eigenvectors would promote the product to
+        # a float64 lines x SNPs array, 0.5 GB more for no useful precision.
+        self.components_ = (u[:, :k].T.astype(np.float32) @ z) / s[:k, None].astype(np.float32)
+        del z
         self.explained_variance_ratio_ = ratio[:k]
         self.explained_variance_ = lam[:k] / max(n - 1, 1)
         if verbose:

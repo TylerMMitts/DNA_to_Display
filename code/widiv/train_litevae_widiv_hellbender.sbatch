@@ -22,7 +22,7 @@
 # Then submit from the project root:
 #     sbatch code/widiv/train_litevae_widiv_hellbender.sbatch
 #
-# A resubmitted job resumes from the newest checkpoint in models/litevae_widiv/.
+# A resubmitted job resumes from the newest checkpoint in models/litevae_widiv_v2/.
 #
 # Check the partition name with `sinfo` and add your account if your allocation
 # requires one.

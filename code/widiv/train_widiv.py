@@ -192,7 +192,7 @@ class CacheImageDataset(Dataset):
 # (images, 8, channels, latent, latent), kept on the CPU.
 #
 # Keyed on the checkpoint's name, size and modification time: train_litevae_widiv.py
-# rewrites litevae_widiv_best.pt whenever validation improves, and latents from
+# rewrites its _best.pt whenever validation improves, and latents from
 # an older autoencoder would not be the space the UNet is meant to learn.
 def load_or_build_latent_cache(encoder, litevae_path, image_dir, filenames, device,
                                batch_images, num_workers):

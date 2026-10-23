@@ -8,9 +8,11 @@
 # weights are identical to the parent's, so at 256 px it gives the same result.
 #
 # The decoder is fully convolutional (three 2x upsampling stages), so the
-# unchanged LiteVAEDecoder already turns a 64x64 latent into a 512 px image.
+# LiteVAEDecoder already turns a 64x64 latent into a 512 px image. WiDiv uses
+# it with a linear output layer instead of its final tanh (LinearOutputLiteVAEDecoder).
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from litevae.models import LiteVAEDecoder, LiteVAEEncoder
@@ -49,6 +51,26 @@ class ScaleFreeLiteVAEEncoder(LiteVAEEncoder):
         return self.reparameterize(z_mean, z_logvar), z_mean, z_logvar
 
 
+# The LiteVAE decoder without its final tanh.
+#
+# 77% of every WiDiv image is pure white background, which is +1 after
+# normalisation - a value a tanh only approaches. The first WiDiv LiteVAE run
+# pushed its outputs deep into the tanh's flat end to chase it, where the slope
+# is almost zero, so no gradient came back from any pixel, root included: from
+# epoch 2 it drew every image all white (loss 0.0663, the all-white loss) and
+# its latent stopped carrying information (KL 0.1 -> 5e-6). A linear output can
+# reach +1 exactly and always passes gradient. Values outside [-1, 1] are
+# clamped by whatever turns the output into an image (generate_batch does).
+#
+# Same layer names as the parent, so only the missing tanh differs.
+class LinearOutputLiteVAEDecoder(LiteVAEDecoder):
+
+    def __init__(self, latent_channels=4, output_channels=3, base_channels=512, num_res_blocks=2):
+        super().__init__(latent_channels, output_channels, base_channels, num_res_blocks)
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(base_channels // 8, output_channels, kernel_size=3, padding=1))
+
+
 # Loads a WiDiv LiteVAE checkpoint (train_litevae_widiv.py), frozen, in eval mode.
 def load_widiv_litevae(checkpoint_path, device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -56,9 +78,12 @@ def load_widiv_litevae(checkpoint_path, device):
     encoder = ScaleFreeLiteVAEEncoder(in_channels=3, latent_channels=cfg['latent_channels'],
                                       feature_channels=cfg['feature_channels'],
                                       num_blocks=cfg['num_blocks'])
-    decoder = LiteVAEDecoder(latent_channels=cfg['latent_channels'], output_channels=3,
-                             base_channels=cfg['base_channels'],
-                             num_res_blocks=cfg['num_res_blocks'])
+    # Checkpoints from before the linear output have no 'output' entry: tanh.
+    decoder_class = (LinearOutputLiteVAEDecoder if cfg.get('output') == 'linear'
+                     else LiteVAEDecoder)
+    decoder = decoder_class(latent_channels=cfg['latent_channels'], output_channels=3,
+                            base_channels=cfg['base_channels'],
+                            num_res_blocks=cfg['num_res_blocks'])
     encoder.load_state_dict(ckpt['encoder_state_dict'])
     decoder.load_state_dict(ckpt['decoder_state_dict'])
     encoder.to(device).eval()

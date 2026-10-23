@@ -12,7 +12,7 @@
 # whenever the time limit ends a job; work since the last checkpoint is redone.
 # Submit one split first (--array=0) if you want the cache built only once.
 #
-# Needs the WiDiv LiteVAE first (models/litevae_widiv/litevae_widiv_best.pt),
+# Needs the WiDiv LiteVAE first (models/litevae_widiv_v2/litevae_widiv_v2_best.pt),
 # plus results/widiv/scaled_512/, dataset/widiv/genetic/ and dataset/widiv/metadata/.
 #
 # Once, on the login node, from the project root:

@@ -15,8 +15,10 @@
 #     flip views, and training reads those latents instead of re-encoding the
 #     images each step. Re-encoding was two thirds of a CPU training step (4.6 s
 #     of about 7 s per batch of 16 on a laptop). The cache keeps each latent's
-#     mean and log-variance, so every step still draws a fresh sample from the
-#     encoder's distribution exactly as encoding on the fly does.
+#     mean and log-variance, so it serves either training target below.
+#   - trains on the encoder's mean latent by default (latent_target), not a
+#     sample from it; the first runs trained on samples, and some noise seeds
+#     then generated roots with white holes (see the cfg comment)
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -302,6 +304,18 @@ def main(overrides=None):
         # Images per encoding batch while building it; each becomes eight views.
         cache_batch_images = 4
 
+        # What the UNet learns to generate: 'mean' (the encoder's mean latent) or
+        # 'sample' (a fresh draw from the encoder's distribution every step, as
+        # the first WiDiv runs did). The LiteVAE leaves the background at its
+        # prior (sigma ~1.0 there, ~0.1 in the root), so a sampled background is
+        # pure N(0,1) noise - the same spread as root latents - and the decoder
+        # draws any noise-like latent as white background. Trained on samples,
+        # the model sometimes left parts of the root noise-like and they came
+        # out as white holes, for every line with the same seed
+        # (results/widiv/seed_sweep/). The mean keeps the background a smooth,
+        # low-spread pattern distinct from tissue. WIDIV_LATENT_TARGET overrides it.
+        latent_target = os.environ.get('WIDIV_LATENT_TARGET', 'mean')
+
         latent_channels = 4
         num_tokens = 8
         num_res_blocks = 2
@@ -332,8 +346,13 @@ def main(overrides=None):
     if size not in SIZE_PRESETS:
         raise SystemExit(f"unknown model size {size!r}; choose one of {list(SIZE_PRESETS)}")
     split = split_column(cfg.split)
+    if cfg.latent_target not in ('mean', 'sample'):
+        raise SystemExit(f"latent_target must be 'mean' or 'sample', not {cfg.latent_target!r}")
     preset = SIZE_PRESETS[size]
-    run_name = cfg.run_name or f"{MODEL_NAME}_{size}_{split.replace('split_', '')}"
+    # Mean-latent runs get their own folder, so they never resume from a
+    # sampled-latent run's checkpoints (those keep the original name).
+    run_name = cfg.run_name or (f"{MODEL_NAME}_{size}_{split.replace('split_', '')}"
+                                + ('_zmean' if cfg.latent_target == 'mean' else ''))
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -356,6 +375,11 @@ def main(overrides=None):
         if resume_ckpt.get('split') != split:
             raise SystemExit(f"{resume_path.name} was trained on {resume_ckpt.get('split')}, "
                              f"not {split}. Give this run its own run_name.")
+        # Checkpoints from before this setting existed were trained on samples.
+        saved_target = resume_ckpt.get('latent_target', 'sample')
+        if saved_target != cfg.latent_target:
+            raise SystemExit(f"{resume_path.name} was trained with latent_target={saved_target!r}, "
+                             f"not {cfg.latent_target!r}. Give this run its own run_name.")
     elif cfg.resume:
         print(f"\nresume=True but no {run_name}_epoch_N.pt found in save_dir - starting fresh")
     else:
@@ -512,10 +536,20 @@ def main(overrides=None):
         train_snp = torch.tensor(np.stack([s['projected'] for s in train_samples]),
                                  dtype=torch.float32)
 
-    # A sample from the encoder's distribution, as LiteVAEEncoder returns it.
+    # The latent the UNet trains on: the encoder's mean, or a sample from its
+    # distribution as LiteVAEEncoder returns it (see cfg.latent_target).
     def sample_latent(mean, logvar):
-        mean, logvar = mean.to(device).float(), logvar.to(device).float()
+        mean = mean.to(device).float()
+        if cfg.latent_target == 'mean':
+            return mean
+        logvar = logvar.to(device).float()
         return mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
+
+    # The same choice for images encoded on the fly (cache_latents = False).
+    def encode_for_training(images):
+        with torch.no_grad():
+            z, mean, _ = litevae_encoder(images)
+        return mean if cfg.latent_target == 'mean' else z
 
     # LatentDiffusionModel.forward from an already-encoded latent.
     def denoising_loss(z, snp):
@@ -530,7 +564,7 @@ def main(overrides=None):
     def training_batches():
         if not cfg.cache_latents:
             for batch in train_loader:
-                yield (ldm.encode_image(batch['image'].to(device, non_blocking=True)),
+                yield (encode_for_training(batch['image'].to(device, non_blocking=True)),
                        batch['snp'].to(device, non_blocking=True))
             return
         order = torch.randperm(len(train_samples))
@@ -656,7 +690,7 @@ def main(overrides=None):
                                          dtype=torch.float32, device=device)))
                 else:
                     eval_cache[name] = [
-                        (ldm.encode_image(b['image'].to(device)), b['snp'].to(device),
+                        (encode_for_training(b['image'].to(device)), b['snp'].to(device),
                          b['wrong_snp'].to(device)) for b in loader]
             torch.manual_seed(cfg.seed + 1000)
             for _ in range(cfg.eval_repeats):
@@ -722,6 +756,7 @@ def main(overrides=None):
                 'snp_encoder_config': encoder_config,
                 'unet_config': unet_config,
                 'encoding': 'widiv_dosage_pca',
+                'latent_target': cfg.latent_target,
                 'split': split,
                 'val_genotypes': sorted(val_lines),
                 'test_genotypes': sorted(test_lines),
@@ -755,6 +790,7 @@ def main(overrides=None):
             'model_size': size, 'unet_parameters': n_unet,
             'snp_encoder_parameters': n_encoder,
             'encoding': 'widiv_dosage_pca',
+            'latent_target': cfg.latent_target,
             'projected_dim': int(projector.output_dim),
             'pca_variance': float(projector.explained_variance_ratio_.sum()),
             'train_lines': len({s['genotype'] for s in train_samples}),

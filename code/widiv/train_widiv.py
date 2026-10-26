@@ -62,7 +62,7 @@ from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.unet import DenoisingUNet
-from latent_diffusion.diffusion.scheduler import DiffusionScheduler
+from widiv_latents import LatentScaler, ScaledClampScheduler, ScaledDecoder
 from latent_diffusion.generation.generate_from_dataset import (
     generate_batch, load_original, save_multi_comparison,
 )
@@ -315,6 +315,13 @@ def main(overrides=None):
         # (results/widiv/seed_sweep/). The mean keeps the background a smooth,
         # low-spread pattern distinct from tissue. WIDIV_LATENT_TARGET overrides it.
         latent_target = os.environ.get('WIDIV_LATENT_TARGET', 'mean')
+        # 'channel' standardises each latent channel to mean 0, spread 1 over the
+        # training latents before diffusion (widiv_latents.py), as latent
+        # diffusion models usually do; 'none' trains on the LiteVAE's raw units,
+        # as every run before this setting did. Mean latents have spread 0.60,
+        # sampled ones 0.99, so it matters mainly with latent_target = 'mean'.
+        # WIDIV_LATENT_SCALING overrides it.
+        latent_scaling = os.environ.get('WIDIV_LATENT_SCALING', 'channel')
 
         latent_channels = 4
         num_tokens = 8
@@ -348,11 +355,14 @@ def main(overrides=None):
     split = split_column(cfg.split)
     if cfg.latent_target not in ('mean', 'sample'):
         raise SystemExit(f"latent_target must be 'mean' or 'sample', not {cfg.latent_target!r}")
+    if cfg.latent_scaling not in ('channel', 'none'):
+        raise SystemExit(f"latent_scaling must be 'channel' or 'none', not {cfg.latent_scaling!r}")
     preset = SIZE_PRESETS[size]
-    # Mean-latent runs get their own folder, so they never resume from a
-    # sampled-latent run's checkpoints (those keep the original name).
+    # Mean-latent and scaled runs get their own folders, so no run ever resumes
+    # from one trained on different latents (the first runs keep the plain name).
     run_name = cfg.run_name or (f"{MODEL_NAME}_{size}_{split.replace('split_', '')}"
-                                + ('_zmean' if cfg.latent_target == 'mean' else ''))
+                                + ('_zmean' if cfg.latent_target == 'mean' else '')
+                                + ('_scaled' if cfg.latent_scaling == 'channel' else ''))
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -380,6 +390,10 @@ def main(overrides=None):
         if saved_target != cfg.latent_target:
             raise SystemExit(f"{resume_path.name} was trained with latent_target={saved_target!r}, "
                              f"not {cfg.latent_target!r}. Give this run its own run_name.")
+        saved_scaling = resume_ckpt.get('latent_scaling', 'none')
+        if saved_scaling != cfg.latent_scaling:
+            raise SystemExit(f"{resume_path.name} was trained with latent_scaling={saved_scaling!r}, "
+                             f"not {cfg.latent_scaling!r}. Give this run its own run_name.")
     elif cfg.resume:
         print(f"\nresume=True but no {run_name}_epoch_N.pt found in save_dir - starting fresh")
     else:
@@ -500,8 +514,8 @@ def main(overrides=None):
         resolve_input(cfg.litevae_checkpoint, 'WiDiv LiteVAE checkpoint '
                       '(train it with train_litevae_widiv.py)'), device)
 
-    scheduler = DiffusionScheduler(num_steps=cfg.num_steps, beta_start=cfg.beta_start,
-                                   beta_end=cfg.beta_end)
+    scheduler = ScaledClampScheduler(num_steps=cfg.num_steps, beta_start=cfg.beta_start,
+                                     beta_end=cfg.beta_end)
     # The scheduler holds plain tensors, not module buffers, so .to(device) on
     # the model does not move them.
     scheduler.betas = scheduler.betas.to(device)
@@ -536,20 +550,47 @@ def main(overrides=None):
         train_snp = torch.tensor(np.stack([s['projected'] for s in train_samples]),
                                  dtype=torch.float32)
 
-    # The latent the UNet trains on: the encoder's mean, or a sample from its
-    # distribution as LiteVAEEncoder returns it (see cfg.latent_target).
-    def sample_latent(mean, logvar):
+    # The latent the UNet trains on, in the LiteVAE's own units: the encoder's
+    # mean, or a sample from its distribution as LiteVAEEncoder returns it
+    # (see cfg.latent_target).
+    def raw_latent(mean, logvar):
         mean = mean.to(device).float()
         if cfg.latent_target == 'mean':
             return mean
         logvar = logvar.to(device).float()
         return mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
 
-    # The same choice for images encoded on the fly (cache_latents = False).
-    def encode_for_training(images):
+    def raw_encode(images):
         with torch.no_grad():
             z, mean, _ = litevae_encoder(images)
         return mean if cfg.latent_target == 'mean' else z
+
+    # The scaling, fitted once on the training latents of this run's target and
+    # kept from then on: a resumed run reuses the checkpoint's numbers, so the
+    # UNet never sees its units change.
+    if resume_ckpt is not None:
+        scaler = LatentScaler.from_checkpoint(resume_ckpt, cfg.latent_channels)
+    elif cfg.latent_scaling == 'none':
+        scaler = LatentScaler.identity(cfg.latent_channels)
+    else:
+        torch.manual_seed(cfg.seed + 7)
+        if cfg.cache_latents:
+            fit_latents = raw_latent(cache_mean[train_rows, 0], cache_logvar[train_rows, 0]).cpu()
+        else:
+            fit_latents = torch.cat([raw_encode(b['image'].to(device)).cpu()
+                                     for _, b in zip(range(32), train_loader)])
+        scaler = LatentScaler.fit(fit_latents)
+        del fit_latents
+    print(f"Latent scaling ({cfg.latent_scaling}, target {cfg.latent_target}): {scaler}")
+    scheduler.set_scaler(scaler)
+
+    # What the UNet trains on and generates: the target latent in scaled units.
+    def sample_latent(mean, logvar):
+        return scaler.encode(raw_latent(mean, logvar))
+
+    # The same for images encoded on the fly (cache_latents = False).
+    def encode_for_training(images):
+        return scaler.encode(raw_encode(images))
 
     # LatentDiffusionModel.forward from an already-encoded latent.
     def denoising_loss(z, snp):
@@ -649,7 +690,7 @@ def main(overrides=None):
             dtype=torch.float32, device=device)
         flat_seeds = [s for seeds in preview_seeds for s in seeds]
         with torch.no_grad():
-            generated = generate_batch(snp_encoder, unet, scheduler, litevae_decoder,
+            generated = generate_batch(snp_encoder, unet, scheduler, ScaledDecoder(litevae_decoder, scaler),
                                        snp_batch, flat_seeds, device,
                                        preview_latent_shape, cfg.preview_sampling_steps)
         for i, s in enumerate(preview_samples):
@@ -757,6 +798,10 @@ def main(overrides=None):
                 'unet_config': unet_config,
                 'encoding': 'widiv_dosage_pca',
                 'latent_target': cfg.latent_target,
+                # Generation must decode with these: widiv_latents.ScaledDecoder
+                # and LatentScaler.from_checkpoint read them back.
+                'latent_scaling': cfg.latent_scaling,
+                'latent_scaler': scaler.state_dict(),
                 'split': split,
                 'val_genotypes': sorted(val_lines),
                 'test_genotypes': sorted(test_lines),
@@ -791,6 +836,8 @@ def main(overrides=None):
             'snp_encoder_parameters': n_encoder,
             'encoding': 'widiv_dosage_pca',
             'latent_target': cfg.latent_target,
+            'latent_scaling': cfg.latent_scaling,
+            'latent_scaler': scaler.state_dict(),
             'projected_dim': int(projector.output_dim),
             'pca_variance': float(projector.explained_variance_ratio_.sum()),
             'train_lines': len({s['genotype'] for s in train_samples}),

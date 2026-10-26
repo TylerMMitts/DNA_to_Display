@@ -14,8 +14,36 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
+
+
+# The layout channel: where the root is, at the latent's resolution.
+#
+# Root and background latents differ mostly in spread, not in average (per
+# channel, root mean 0.0/+0.50/0.0/-0.16 against background 0.0/-0.23/0.0/+0.05,
+# spreads about 1.0 against 0.25). Early in sampling the UNet sees little but
+# averages, so where the root ends is barely visible to it and is settled late,
+# by the starting noise - the seed-dependent broken roots. This channel is +1
+# inside the root and -1 outside, a contrast in average that survives heavy
+# noise, so the root's outline and size are settled in the first, noisiest
+# steps and tissue fills in within it. The UNet generates it as a fifth channel;
+# the decoder never sees it (ScaledDecoder drops it).
+#
+# The root is a centred disc reaching the outermost tissue pixel, as in the
+# LiteVAE's foreground weighting: prepare_widiv_images.py centres every root,
+# and a disc includes the white vessel lumens and aerenchyma gaps inside it.
+# Averaged over each 8x8 block, so the rim is fractional rather than a hard step.
+def root_layout(images, factor=8):
+    B, _, H, W = images.shape
+    ys = torch.arange(H, device=images.device, dtype=torch.float32) - (H - 1) / 2
+    xs = torch.arange(W, device=images.device, dtype=torch.float32) - (W - 1) / 2
+    dist = torch.sqrt(ys[:, None] ** 2 + xs[None, :] ** 2)
+    tissue = images.min(dim=1).values < 0.96                      # white is +1
+    radius = torch.where(tissue, dist, torch.zeros_like(dist)).flatten(1).amax(1)
+    disc = (dist[None] <= radius[:, None, None]).float()[:, None]
+    return F.avg_pool2d(disc, factor) * 2 - 1
 
 
 class LatentScaler:
@@ -59,9 +87,10 @@ class LatentScaler:
                 f"scale={[round(v, 3) for v in self.scale.flatten().tolist()]})")
 
 
-# The LiteVAE decoder fed with scaled latents: undoes the scaling first, so
-# anything that decodes a generated latent (generate_batch, previews, analysis)
-# can be handed this in place of the decoder.
+# The LiteVAE decoder fed with what the UNet generates: keeps the LiteVAE's
+# channels (dropping a layout channel if there is one) and undoes the scaling,
+# so anything that decodes a generated latent (generate_batch, previews,
+# analysis) can be handed this in place of the decoder.
 class ScaledDecoder(nn.Module):
 
     def __init__(self, decoder, scaler):
@@ -70,7 +99,18 @@ class ScaledDecoder(nn.Module):
         self.scaler = scaler
 
     def forward(self, z, save_steps=False):
-        return self.decoder(self.scaler.decode(z), save_steps=save_steps)
+        c = self.scaler.shift.shape[1]
+        return self.decoder(self.scaler.decode(z[:, :c]), save_steps=save_steps)
+
+
+# The generated root layout as a 0-1 mask at image resolution, for a latent the
+# UNet generated with a layout channel (its last channel); None without one.
+def generated_layout(z, scaler, size=None):
+    c = scaler.shift.shape[1]
+    if z.shape[1] <= c:
+        return None
+    m = ((z[:, c:c + 1].clamp(-1, 1) + 1) / 2)
+    return F.interpolate(m, size=size, mode='bilinear', align_corners=False) if size else m
 
 
 # DiffusionScheduler with the clamp on the predicted clean latent moved into
@@ -80,10 +120,16 @@ class ScaledDecoder(nn.Module):
 # original units, about 7% of the root, instead of 0.4%. Same sampling otherwise.
 class ScaledClampScheduler(DiffusionScheduler):
 
-    def set_scaler(self, scaler, bound=3.0):
+    # extra_channels: channels after the LiteVAE's (the layout channel), which
+    # are not scaled and keep the plain +/-bound.
+    def set_scaler(self, scaler, bound=3.0, extra_channels=0):
         channels = scaler.shift.shape[1]
-        self.clamp_lo = scaler.encode(torch.full((1, channels, 1, 1), -bound))
-        self.clamp_hi = scaler.encode(torch.full((1, channels, 1, 1), bound))
+        lo = scaler.encode(torch.full((1, channels, 1, 1), -bound))
+        hi = scaler.encode(torch.full((1, channels, 1, 1), bound))
+        if extra_channels:
+            lo = torch.cat([lo, torch.full((1, extra_channels, 1, 1), -bound)], 1)
+            hi = torch.cat([hi, torch.full((1, extra_channels, 1, 1), bound)], 1)
+        self.clamp_lo, self.clamp_hi = lo, hi
         return self
 
     def denoise_step(self, z_t, noise_pred, t, t_prev=None, eta=0.0):

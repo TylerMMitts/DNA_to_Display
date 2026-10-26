@@ -19,6 +19,8 @@
 #   - trains on the encoder's mean latent by default (latent_target), not a
 #     sample from it; the first runs trained on samples, and some noise seeds
 #     then generated roots with white holes (see the cfg comment)
+#   - optional latent scaling (latent_scaling) and an optional fifth layout
+#     channel marking the root (layout_channel); both in widiv_latents.py
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -62,7 +64,7 @@ from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.unet import DenoisingUNet
-from widiv_latents import LatentScaler, ScaledClampScheduler, ScaledDecoder
+from widiv_latents import LatentScaler, ScaledClampScheduler, ScaledDecoder, root_layout
 from latent_diffusion.generation.generate_from_dataset import (
     generate_batch, load_original, save_multi_comparison,
 )
@@ -234,6 +236,31 @@ def load_or_build_latent_cache(encoder, litevae_path, image_dir, filenames, devi
     return {n: i for i, n in enumerate(filenames)}, mean, logvar
 
 
+# Every image's layout channel (widiv_latents.root_layout) in all eight views,
+# or the saved copy. It depends only on the images, not on any model, so one
+# file serves every run; it is rebuilt if the image list changes. Returns
+# filename -> row and float16 masks of shape (images, 8, 1, latent, latent).
+def load_or_build_layout_cache(image_dir, filenames, image_size, batch_images, num_workers):
+    WIDIV_LATENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = WIDIV_LATENT_CACHE_DIR / f'layout_{image_size}.pt'
+    if path.exists():
+        cache = torch.load(path, map_location='cpu', weights_only=False)
+        if set(filenames) <= set(cache['filenames']):
+            print(f"Layout cache: {path.name} ({len(cache['filenames'])} images x 8 views)")
+            return {n: i for i, n in enumerate(cache['filenames'])}, cache['layout']
+    filenames = sorted(filenames)
+    print(f"Layout cache: computing {len(filenames)} images x 8 views")
+    loader = DataLoader(CacheImageDataset(Path(image_dir) / n for n in filenames),
+                        batch_size=batch_images, shuffle=False, num_workers=num_workers)
+    with torch.no_grad():
+        layout = torch.cat([torch.stack(dihedral_views(root_layout(images)), dim=1).half()
+                            for images in tqdm(loader, desc='Layout masks')])
+    tmp = path.with_suffix(f'.{os.getpid()}.tmp')
+    torch.save({'filenames': filenames, 'layout': layout}, tmp)
+    os.replace(tmp, path)
+    return {n: i for i, n in enumerate(filenames)}, layout
+
+
 # Finds the newest checkpoint to resume from, or None if the folder holds none.
 def find_resumable_checkpoint(save_dir, run_name):
     try:
@@ -322,6 +349,13 @@ def main(overrides=None):
         # sampled ones 0.99, so it matters mainly with latent_target = 'mean'.
         # WIDIV_LATENT_SCALING overrides it.
         latent_scaling = os.environ.get('WIDIV_LATENT_SCALING', 'channel')
+        # Adds a fifth channel the UNet generates beside the four LiteVAE ones:
+        # +1 inside the root, -1 outside (widiv_latents.root_layout). Root and
+        # background latents differ mostly in spread, which heavy noise hides,
+        # so without it the root's outline is settled late and by the starting
+        # noise; a +1/-1 contrast survives the noise and is settled first. The
+        # decoder never sees it. WIDIV_LAYOUT_CHANNEL=1 turns it on.
+        layout_channel = os.environ.get('WIDIV_LAYOUT_CHANNEL', '0') == '1'
 
         latent_channels = 4
         num_tokens = 8
@@ -362,7 +396,10 @@ def main(overrides=None):
     # from one trained on different latents (the first runs keep the plain name).
     run_name = cfg.run_name or (f"{MODEL_NAME}_{size}_{split.replace('split_', '')}"
                                 + ('_zmean' if cfg.latent_target == 'mean' else '')
-                                + ('_scaled' if cfg.latent_scaling == 'channel' else ''))
+                                + ('_scaled' if cfg.latent_scaling == 'channel' else '')
+                                + ('_layout' if cfg.layout_channel else ''))
+    # The UNet's channels: the LiteVAE's, plus the layout channel when it is on.
+    unet_channels = cfg.latent_channels + int(cfg.layout_channel)
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -394,6 +431,10 @@ def main(overrides=None):
         if saved_scaling != cfg.latent_scaling:
             raise SystemExit(f"{resume_path.name} was trained with latent_scaling={saved_scaling!r}, "
                              f"not {cfg.latent_scaling!r}. Give this run its own run_name.")
+        if bool(resume_ckpt.get('layout_channel', False)) != cfg.layout_channel:
+            raise SystemExit(f"{resume_path.name} was trained with layout_channel="
+                             f"{bool(resume_ckpt.get('layout_channel', False))}, not "
+                             f"{cfg.layout_channel}. Give this run its own run_name.")
     elif cfg.resume:
         print(f"\nresume=True but no {run_name}_epoch_N.pt found in save_dir - starting fresh")
     else:
@@ -482,7 +523,7 @@ def main(overrides=None):
         'hidden_dim': preset['encoder_hidden_dim'],
     }
     unet_config = {
-        'latent_channels': cfg.latent_channels, 'base_channels': preset['base_channels'],
+        'latent_channels': unet_channels, 'base_channels': preset['base_channels'],
         'snp_embed_dim': preset['snp_embed_dim'], 'd_attention': preset['d_attention'],
         'num_res_blocks': cfg.num_res_blocks,
         'attention_resolutions': cfg.attention_resolutions,
@@ -582,15 +623,33 @@ def main(overrides=None):
         scaler = LatentScaler.fit(fit_latents)
         del fit_latents
     print(f"Latent scaling ({cfg.latent_scaling}, target {cfg.latent_target}): {scaler}")
-    scheduler.set_scaler(scaler)
+    scheduler.set_scaler(scaler, extra_channels=int(cfg.layout_channel))
 
-    # What the UNet trains on and generates: the target latent in scaled units.
-    def sample_latent(mean, logvar):
-        return scaler.encode(raw_latent(mean, logvar))
+    # Each image's layout channel in all eight views, computed once from the
+    # images; a 64x64 mask turns exactly with its image, so view k of the mask
+    # matches view k of the cached latent.
+    if cfg.layout_channel and cfg.cache_latents:
+        layout_row, layout_views = load_or_build_layout_cache(
+            image_dir, metadata.scaled_filename.tolist(), cfg.image_size,
+            cfg.cache_batch_images * 4, cfg.num_workers)
+
+        def layout_rows(samples):
+            return torch.tensor([layout_row[s['image_path'].name] for s in samples])
+
+        train_layout_rows = layout_rows(train_samples)
+        print(f"Layout channel on: root covers {float((layout_views[:, 0] > 0).float().mean()):.0%} "
+              "of the latent on average")
+
+    # What the UNet trains on and generates: the target latent in scaled units,
+    # with the layout channel after it when that is on.
+    def sample_latent(mean, logvar, layout=None):
+        z = scaler.encode(raw_latent(mean, logvar))
+        return torch.cat([z, layout.to(device).float()], 1) if layout is not None else z
 
     # The same for images encoded on the fly (cache_latents = False).
     def encode_for_training(images):
-        return scaler.encode(raw_encode(images))
+        z = scaler.encode(raw_encode(images))
+        return torch.cat([z, root_layout(images)], 1) if cfg.layout_channel else z
 
     # LatentDiffusionModel.forward from an already-encoded latent.
     def denoising_loss(z, snp):
@@ -613,7 +672,8 @@ def main(overrides=None):
             idx = order[start:start + cfg.batch_size]
             view = torch.randint(8, (len(idx),))
             rows = train_rows[idx]
-            yield (sample_latent(cache_mean[rows, view], cache_logvar[rows, view]),
+            layout = layout_views[train_layout_rows[idx], view] if cfg.layout_channel else None
+            yield (sample_latent(cache_mean[rows, view], cache_logvar[rows, view], layout),
                    train_snp[idx].to(device))
 
     n_batches = (len(train_samples) // cfg.batch_size if cfg.cache_latents
@@ -676,7 +736,7 @@ def main(overrides=None):
         ldm.litevae_decoder.eval()
 
     preview_dir = results_dir / 'previews'
-    preview_latent_shape = (cfg.latent_channels, cfg.preview_latent_size, cfg.preview_latent_size)
+    preview_latent_shape = (unet_channels, cfg.preview_latent_size, cfg.preview_latent_size)
     # Fixed seeds per line, reused at every preview, so what changes between
     # previews is the model and not the noise it started from.
     preview_seeds = [[cfg.seed + 100 * i + j for j in range(cfg.n_preview_seeds)]
@@ -719,12 +779,15 @@ def main(overrides=None):
                 torch.manual_seed(cfg.seed + 999)
                 if cfg.cache_latents:
                     rows = cached_rows(samples)
+                    lrows = layout_rows(samples) if cfg.layout_channel else None
                     eval_cache[name] = []
                     for start in range(0, len(samples), cfg.batch_size):
                         part = samples[start:start + cfg.batch_size]
                         r = rows[start:start + cfg.batch_size]
+                        layout = (layout_views[lrows[start:start + cfg.batch_size], 0]
+                                  if cfg.layout_channel else None)
                         eval_cache[name].append((
-                            sample_latent(cache_mean[r, 0], cache_logvar[r, 0]),
+                            sample_latent(cache_mean[r, 0], cache_logvar[r, 0], layout),
                             torch.tensor(np.stack([s['projected'] for s in part]),
                                          dtype=torch.float32, device=device),
                             torch.tensor(np.stack([s['wrong_projected'] for s in part]),
@@ -802,6 +865,9 @@ def main(overrides=None):
                 # and LatentScaler.from_checkpoint read them back.
                 'latent_scaling': cfg.latent_scaling,
                 'latent_scaler': scaler.state_dict(),
+                # A fifth UNet channel (unet_config latent_channels = 5): generate
+                # 5 channels and decode through ScaledDecoder, which drops it.
+                'layout_channel': cfg.layout_channel,
                 'split': split,
                 'val_genotypes': sorted(val_lines),
                 'test_genotypes': sorted(test_lines),
@@ -838,6 +904,7 @@ def main(overrides=None):
             'latent_target': cfg.latent_target,
             'latent_scaling': cfg.latent_scaling,
             'latent_scaler': scaler.state_dict(),
+            'layout_channel': cfg.layout_channel,
             'projected_dim': int(projector.output_dim),
             'pca_variance': float(projector.explained_variance_ratio_.sum()),
             'train_lines': len({s['genotype'] for s in train_samples}),

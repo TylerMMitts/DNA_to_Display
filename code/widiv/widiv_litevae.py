@@ -88,6 +88,8 @@ def load_widiv_litevae(checkpoint_path, device):
     decoder.load_state_dict(ckpt['decoder_state_dict'])
     encoder.to(device).eval()
     decoder.to(device).eval()
+    # Recorded by train_widiv.py in each diffusion checkpoint.
+    encoder.litevae_epoch = ckpt.get('epoch')
     print(f"WiDiv LiteVAE loaded (epoch {ckpt.get('epoch', '?')}, "
           f"{ckpt.get('image_size', '?')} px), frozen")
     return encoder, decoder

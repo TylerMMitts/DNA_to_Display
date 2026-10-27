@@ -261,6 +261,15 @@ def load_or_build_layout_cache(image_dir, filenames, image_size, batch_images, n
     return {n: i for i, n in enumerate(filenames)}, layout
 
 
+# The run-name suffix for the autoencoder a run learns on: '' for v2, which
+# trained every run before v3 (so they keep their names and still resume), and
+# '_vaev3' and so on for later ones, so a run on a new latent space never
+# resumes from, or overwrites, one on an old space.
+def litevae_tag(litevae_checkpoint):
+    folder = Path(litevae_checkpoint).parent.name
+    return '' if folder == 'litevae_widiv_v2' else '_' + folder.replace('litevae_widiv_', 'vae')
+
+
 # Finds the newest checkpoint to resume from, or None if the folder holds none.
 def find_resumable_checkpoint(save_dir, run_name):
     try:
@@ -341,14 +350,17 @@ def main(overrides=None):
         # out as white holes, for every line with the same seed
         # (results/widiv/seed_sweep/). The mean keeps the background a smooth,
         # low-spread pattern distinct from tissue. WIDIV_LATENT_TARGET overrides it.
-        latent_target = os.environ.get('WIDIV_LATENT_TARGET', 'mean')
+        # Default back to 'sample': on the v2 LiteVAE, 'mean' cut valid roots from
+        # 55% to 6% (results/widiv/seed_sweep/).
+        latent_target = os.environ.get('WIDIV_LATENT_TARGET', 'sample')
         # 'channel' standardises each latent channel to mean 0, spread 1 over the
         # training latents before diffusion (widiv_latents.py), as latent
         # diffusion models usually do; 'none' trains on the LiteVAE's raw units,
         # as every run before this setting did. Mean latents have spread 0.60,
         # sampled ones 0.99, so it matters mainly with latent_target = 'mean'.
         # WIDIV_LATENT_SCALING overrides it.
-        latent_scaling = os.environ.get('WIDIV_LATENT_SCALING', 'channel')
+        # Default 'none': with mean latents on the v2 LiteVAE, scaling gave 9% valid.
+        latent_scaling = os.environ.get('WIDIV_LATENT_SCALING', 'none')
         # Adds a fifth channel the UNet generates beside the four LiteVAE ones:
         # +1 inside the root, -1 outside (widiv_latents.root_layout). Root and
         # background latents differ mostly in spread, which heavy noise hides,
@@ -397,7 +409,8 @@ def main(overrides=None):
     run_name = cfg.run_name or (f"{MODEL_NAME}_{size}_{split.replace('split_', '')}"
                                 + ('_zmean' if cfg.latent_target == 'mean' else '')
                                 + ('_scaled' if cfg.latent_scaling == 'channel' else '')
-                                + ('_layout' if cfg.layout_channel else ''))
+                                + ('_layout' if cfg.layout_channel else '')
+                                + litevae_tag(cfg.litevae_checkpoint))
     # The UNet's channels: the LiteVAE's, plus the layout channel when it is on.
     unet_channels = cfg.latent_channels + int(cfg.layout_channel)
 
@@ -431,6 +444,12 @@ def main(overrides=None):
         if saved_scaling != cfg.latent_scaling:
             raise SystemExit(f"{resume_path.name} was trained with latent_scaling={saved_scaling!r}, "
                              f"not {cfg.latent_scaling!r}. Give this run its own run_name.")
+        # A diffusion model is tied to its autoencoder's latent space. Older
+        # checkpoints did not record theirs; those were all trained on v2.
+        saved_vae = resume_ckpt.get('litevae', 'litevae_widiv_v2_best.pt')
+        if saved_vae != Path(cfg.litevae_checkpoint).name:
+            raise SystemExit(f"{resume_path.name} was trained on {saved_vae}, not "
+                             f"{Path(cfg.litevae_checkpoint).name}. Give this run its own run_name.")
         if bool(resume_ckpt.get('layout_channel', False)) != cfg.layout_channel:
             raise SystemExit(f"{resume_path.name} was trained with layout_channel="
                              f"{bool(resume_ckpt.get('layout_channel', False))}, not "
@@ -554,6 +573,7 @@ def main(overrides=None):
     litevae_encoder, litevae_decoder = load_widiv_litevae(
         resolve_input(cfg.litevae_checkpoint, 'WiDiv LiteVAE checkpoint '
                       '(train it with train_litevae_widiv.py)'), device)
+    litevae_epoch = getattr(litevae_encoder, 'litevae_epoch', None)
 
     scheduler = ScaledClampScheduler(num_steps=cfg.num_steps, beta_start=cfg.beta_start,
                                      beta_end=cfg.beta_end)
@@ -868,6 +888,10 @@ def main(overrides=None):
                 # A fifth UNet channel (unet_config latent_channels = 5): generate
                 # 5 channels and decode through ScaledDecoder, which drops it.
                 'layout_channel': cfg.layout_channel,
+                # The autoencoder whose latent space this model learned; decode
+                # its images with that checkpoint, never another.
+                'litevae': Path(cfg.litevae_checkpoint).name,
+                'litevae_epoch': litevae_epoch,
                 'split': split,
                 'val_genotypes': sorted(val_lines),
                 'test_genotypes': sorted(test_lines),
@@ -905,6 +929,8 @@ def main(overrides=None):
             'latent_scaling': cfg.latent_scaling,
             'latent_scaler': scaler.state_dict(),
             'layout_channel': cfg.layout_channel,
+            'litevae': Path(cfg.litevae_checkpoint).name,
+            'litevae_epoch': litevae_epoch,
             'projected_dim': int(projector.output_dim),
             'pca_variance': float(projector.explained_variance_ratio_.sum()),
             'train_lines': len({s['genotype'] for s in train_samples}),

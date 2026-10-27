@@ -68,8 +68,11 @@ WIDIV_LATENT_CACHE_DIR = RESULTS_DIR / 'cache' / 'widiv_latents'
 # WiDiv gets its own autoencoder: the root LiteVAE never saw rendered images
 # (18-21 dB inside the root on them) and is fixed at 256 px.
 #
-# v2 has a linear output and a background-weighted loss (train_litevae_widiv.py).
-# models/litevae_widiv/ holds the first run, which collapsed to drawing every
-# image white; it is kept, but nothing reads it.
-WIDIV_LITEVAE_DIR = MODELS_DIR / 'litevae_widiv_v2'
-WIDIV_LITEVAE_MODEL = WIDIV_LITEVAE_DIR / 'litevae_widiv_v2_best.pt'
+# v3 adds a background prior: latents outside the root are pulled to a fixed
+# value, so root and background differ in latent value (train_litevae_widiv.py).
+# v2 (linear output, background-weighted loss) trained every diffusion model up
+# to the layout-channel runs; models/litevae_widiv/ holds the first run, which
+# collapsed to drawing every image white. Both are kept; nothing reads them by default.
+WIDIV_LITEVAE_DIR = MODELS_DIR / 'litevae_widiv_v3'
+WIDIV_LITEVAE_MODEL = WIDIV_LITEVAE_DIR / 'litevae_widiv_v3_best.pt'
+WIDIV_LITEVAE_V2_MODEL = MODELS_DIR / 'litevae_widiv_v2' / 'litevae_widiv_v2_best.pt'

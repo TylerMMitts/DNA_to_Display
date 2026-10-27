@@ -13,9 +13,12 @@
 #     run without these collapsed: 77% of each image is white background, the
 #     decoder saturated its tanh chasing it, and from epoch 2 it drew every
 #     image all white with a latent that carried nothing (see widiv_litevae.py)
+#   - a background prior (v3): latent pixels outside the root are pulled to a
+#     fixed value instead of the usual N(0, 1) prior, so background and root
+#     differ in latent VALUE, not only in texture (see LiteVAELoss)
 #
-# Run prepare_widiv_images.py first. Weights go to models/litevae_widiv_v2/,
-# reconstructions and loss curves to results/training/litevae_widiv_v2/. Resumes
+# Run prepare_widiv_images.py first. Weights go to models/litevae_widiv_v3/,
+# reconstructions and loss curves to results/training/litevae_widiv_v3/. Resumes
 # from the newest checkpoint if one exists.
 
 import json
@@ -29,6 +32,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
@@ -48,7 +52,7 @@ from widiv_litevae import LinearOutputLiteVAEDecoder, ScaleFreeLiteVAEEncoder
 
 # Every checkpoint this script writes is prefixed with this, so a stray .pt file
 # still says which model produced it once it has been copied elsewhere.
-MODEL_NAME = WIDIV_LITEVAE_DIR.name          # litevae_widiv_v2
+MODEL_NAME = WIDIV_LITEVAE_DIR.name          # litevae_widiv_v3
 
 
 class WidivImageDataset(Dataset):
@@ -81,13 +85,36 @@ def foreground_mask(images, margin=3):
     return (dist[None] <= radius[:, None, None] + margin).float()[:, None]
 
 
+# Latent pixels whose 8x8 block touches the root disc (True) or lies wholly in
+# the background (False), at the latent's resolution.
+def latent_root_mask(original, z):
+    factor = original.shape[-1] // z.shape[-1]
+    return F.max_pool2d(foreground_mask(original), factor) > 0
+
+
 class LiteVAELoss(nn.Module):
 
-    def __init__(self, recon_weight=1.0, kl_weight=0.001, background_weight=0.1):
+    # background_latent: None keeps the usual N(0, 1) prior everywhere (v2).
+    # A number gives latent pixels wholly outside the root the prior
+    # N(background_latent, background_sigma^2) instead, in every channel.
+    #
+    # Why: with one N(0, 1) prior everywhere, the encoder had no reason to put
+    # anything in the background, so it left it at the prior - mean 0, sigma 1.
+    # Root latents also average about 0, so root and background differed only in
+    # spread (about 1.0 against 0.25 at the mean), a texture difference that heavy
+    # noise hides; the diffusion model then settled where the root ends late and
+    # by its starting noise, and about half its roots broke. A background prior
+    # of N(-2, 0.1^2) puts the background two root-spreads away in value in all
+    # four channels, a contrast that survives noise, and makes it deterministic.
+    # The decoder learns that this value means white; reconstruction is unaffected.
+    def __init__(self, recon_weight=1.0, kl_weight=0.001, background_weight=0.1,
+                 background_latent=None, background_sigma=0.1):
         super().__init__()
         self.recon_weight = recon_weight
         self.kl_weight = kl_weight
         self.background_weight = background_weight
+        self.background_latent = background_latent
+        self.background_sigma = background_sigma
 
     # Squared error with background pixels counted at background_weight of a
     # root pixel. Unweighted, three quarters of the loss is white paper, which
@@ -97,10 +124,22 @@ class LiteVAELoss(nn.Module):
         weight = fg + self.background_weight * (1 - fg)
         err = (recon - original) ** 2
         recon_loss = (err * weight).sum() / (weight.sum() * original.shape[1])
-        # KL = -0.5 * sum(1 + log_var - mean^2 - exp(log_var)), averaged over
-        # elements so the weighting does not depend on batch size.
-        kl_loss = -0.5 * torch.sum(
-            1 + z_logvar - z_mean.pow(2) - z_logvar.exp()) / z_mean.numel()
+        if self.background_latent is None:
+            # KL = -0.5 * sum(1 + log_var - mean^2 - exp(log_var)), averaged over
+            # elements so the weighting does not depend on batch size.
+            kl_loss = -0.5 * torch.sum(
+                1 + z_logvar - z_mean.pow(2) - z_logvar.exp()) / z_mean.numel()
+        else:
+            # KL to a per-pixel prior N(mu_p, sigma_p^2): N(0, 1) on the root,
+            # N(background_latent, background_sigma^2) on the background.
+            root = latent_root_mask(original, z_mean).expand_as(z_mean)
+            mu_p = torch.where(root, torch.zeros_like(z_mean),
+                               torch.full_like(z_mean, self.background_latent))
+            logvar_p = torch.where(root, torch.zeros_like(z_logvar),
+                                   torch.full_like(z_logvar, 2 * float(np.log(self.background_sigma))))
+            kl_loss = 0.5 * torch.sum(
+                torch.exp(z_logvar - logvar_p) + (z_mean - mu_p).pow(2) / torch.exp(logvar_p)
+                - 1 + logvar_p - z_logvar) / z_mean.numel()
         # Plain MSE as well, comparable with the first run and other autoencoders.
         return (self.recon_weight * recon_loss + self.kl_weight * kl_loss,
                 recon_loss, kl_loss, err.mean())
@@ -146,6 +185,11 @@ def main():
         # learning_rate (about 2 epochs), so the first steps cannot throw the
         # outputs to an extreme before the network has learned anything.
         warmup_steps = 500
+        # The background prior (see LiteVAELoss): latent pixels wholly outside
+        # the root are pulled to background_latent in every channel, with spread
+        # background_sigma. None restores the single N(0, 1) prior of v2.
+        background_latent = -2.0
+        background_sigma = 0.1
         val_split = 0.1
         num_workers = 8
         image_size = WIDIV_IMAGE_SIZE
@@ -211,6 +255,8 @@ def main():
         # Read by load_widiv_litevae to build the matching decoder.
         'output': 'linear',
         'background_weight': cfg.background_weight,
+        'background_latent': cfg.background_latent,
+        'background_sigma': cfg.background_sigma if cfg.background_latent is not None else None,
     }
 
     resume_path = find_resumable_checkpoint(save_dir) if cfg.resume else None
@@ -238,7 +284,9 @@ def main():
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
                                                      factor=0.5, patience=10)
     criterion = LiteVAELoss(recon_weight=cfg.recon_weight, kl_weight=cfg.kl_weight,
-                            background_weight=cfg.background_weight)
+                            background_weight=cfg.background_weight,
+                            background_latent=cfg.background_latent,
+                            background_sigma=cfg.background_sigma)
 
     # The loss of an output that is white everywhere, on the validation images:
     # a run whose plain MSE stays at this has collapsed the way the first did.
@@ -312,6 +360,10 @@ def main():
         encoder.eval()
         decoder.eval()
         val_total, val_mse = 0.0, 0.0
+        # Where the latent means sit, root vs background: with the background
+        # prior the background should settle at background_latent, well apart
+        # from the root.
+        zr, zb = [], []
         with torch.no_grad():
             for images in val_loader:
                 images = images.to(device, non_blocking=True)
@@ -320,8 +372,14 @@ def main():
                 out = criterion(recon, images, z_mean, z_logvar)
                 val_total += out[0].item()
                 val_mse += out[3].item()
+                root = latent_root_mask(images, z_mean).expand_as(z_mean)
+                zr.append(z_mean[root].float().cpu()); zb.append(z_mean[~root].float().cpu())
         val_loss = val_total / max(len(val_loader), 1)
         val_mse /= max(len(val_loader), 1)
+        zr, zb = torch.cat(zr), torch.cat(zb)
+        latent_stats = {'root_latent_mean': float(zr.mean()), 'root_latent_std': float(zr.std()),
+                        'background_latent_mean': float(zb.mean()),
+                        'background_latent_std': float(zb.std())}
 
         if step >= cfg.warmup_steps:
             scheduler.step(val_loss)
@@ -329,11 +387,15 @@ def main():
                         'recon_loss': train_recon, 'kl_loss': train_kl,
                         'train_plain_mse': train_mse,
                         'val_loss': val_loss, 'val_plain_mse': val_mse,
-                        'all_white_mse': white_mse,
+                        'all_white_mse': white_mse, **latent_stats,
                         'lr': optimizer.param_groups[0]['lr']})
         print(f"  train {train_loss:.4f} (recon {train_recon:.4f}, kl {train_kl:.6f})"
               f"   val {val_loss:.4f}   val plain MSE {val_mse:.4f} (all white {white_mse:.4f})"
-              f"   lr {optimizer.param_groups[0]['lr']:.2e}")
+              f"   lr {optimizer.param_groups[0]['lr']:.2e}\n"
+              f"  latent means: root {latent_stats['root_latent_mean']:+.2f} "
+              f"(sd {latent_stats['root_latent_std']:.2f}), background "
+              f"{latent_stats['background_latent_mean']:+.2f} (sd {latent_stats['background_latent_std']:.2f})"
+              + (f", target {cfg.background_latent:+.1f}" if cfg.background_latent is not None else ''))
         if epoch >= start_epoch + 2 and val_mse > 0.95 * white_mse:
             print("  WARNING: validation MSE is still within 5% of an all-white output - "
                   "the decoder may have collapsed to drawing the background. Check the "

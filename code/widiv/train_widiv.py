@@ -21,6 +21,9 @@
 #     then generated roots with white holes (see the cfg comment)
 #   - optional latent scaling (latent_scaling) and an optional fifth layout
 #     channel marking the root (layout_channel); both in widiv_latents.py
+#   - previews sample from starting noise matched to the training latents'
+#     per-channel mean (widiv_latents.matched_start_noise), saved in every
+#     checkpoint as latent_channel_mean for generation to do the same
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -64,10 +67,10 @@ from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.unet import DenoisingUNet
-from widiv_latents import LatentScaler, ScaledClampScheduler, ScaledDecoder, root_layout
-from latent_diffusion.generation.generate_from_dataset import (
-    generate_batch, load_original, save_multi_comparison,
+from widiv_latents import (
+    LatentScaler, ScaledClampScheduler, ScaledDecoder, channel_mean, generate_widiv_batch, root_layout,
 )
+from latent_diffusion.generation.generate_from_dataset import load_original, save_multi_comparison
 
 # Every checkpoint this script writes is prefixed with this, so a stray .pt file
 # still says which model produced it once it has been copied elsewhere.
@@ -671,6 +674,19 @@ def main(overrides=None):
         z = scaler.encode(raw_encode(images))
         return torch.cat([z, root_layout(images)], 1) if cfg.layout_channel else z
 
+    # Each channel's mean training latent in the UNet's units, which sampling
+    # gives its starting noise (widiv_latents.matched_start_noise). Quarter turns
+    # and flips keep an image's spatial average, so view 0 is enough.
+    if cfg.cache_latents:
+        latent_mean = channel_mean(scaler.encode(cache_mean[train_rows, 0].float()))
+        if cfg.layout_channel:
+            latent_mean += channel_mean(layout_views[train_layout_rows, 0])
+    else:
+        latent_mean = channel_mean(torch.cat([encode_for_training(b['image'].to(device)).cpu()
+                                              for _, b in zip(range(32), train_loader)]))
+    print(f"Sampling starts from noise matched to the training latent mean "
+          f"{[round(v, 2) for v in latent_mean]}")
+
     # LatentDiffusionModel.forward from an already-encoded latent.
     def denoising_loss(z, snp):
         t = torch.randint(0, scheduler.num_steps, (z.shape[0],), device=device)
@@ -770,9 +786,10 @@ def main(overrides=None):
             dtype=torch.float32, device=device)
         flat_seeds = [s for seeds in preview_seeds for s in seeds]
         with torch.no_grad():
-            generated = generate_batch(snp_encoder, unet, scheduler, ScaledDecoder(litevae_decoder, scaler),
-                                       snp_batch, flat_seeds, device,
-                                       preview_latent_shape, cfg.preview_sampling_steps)
+            generated = generate_widiv_batch(snp_encoder, unet, scheduler,
+                                             ScaledDecoder(litevae_decoder, scaler),
+                                             snp_batch, flat_seeds, device, preview_latent_shape,
+                                             cfg.preview_sampling_steps, latent_mean=latent_mean)
         for i, s in enumerate(preview_samples):
             original = load_original(s['image_path'], cfg.image_size)
             start = i * cfg.n_preview_seeds
@@ -888,6 +905,9 @@ def main(overrides=None):
                 # A fifth UNet channel (unet_config latent_channels = 5): generate
                 # 5 channels and decode through ScaledDecoder, which drops it.
                 'layout_channel': cfg.layout_channel,
+                # Sample from widiv_latents.matched_start_noise with this
+                # (generate_widiv_batch's latent_mean); plain noise breaks most v3 roots.
+                'latent_channel_mean': latent_mean,
                 # The autoencoder whose latent space this model learned; decode
                 # its images with that checkpoint, never another.
                 'litevae': Path(cfg.litevae_checkpoint).name,
@@ -929,6 +949,7 @@ def main(overrides=None):
             'latent_scaling': cfg.latent_scaling,
             'latent_scaler': scaler.state_dict(),
             'layout_channel': cfg.layout_channel,
+            'latent_channel_mean': latent_mean,
             'litevae': Path(cfg.litevae_checkpoint).name,
             'litevae_epoch': litevae_epoch,
             'projected_dim': int(projector.output_dim),

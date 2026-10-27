@@ -12,6 +12,7 @@
 # The shift and scale are fitted once at the start of a run and saved in every
 # checkpoint, so generation and analysis decode with exactly the same numbers.
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -159,3 +160,69 @@ class ScaledClampScheduler(DiffusionScheduler):
             mask = (t_prev.view(-1, 1, 1, 1) >= 0).float()
             z_prev = z_prev + mask * sigma * torch.randn_like(z_t)
         return z_prev
+
+
+# Starting noise whose per-channel average is the one training inputs had.
+#
+# The linear schedule keeps sqrt(alpha_bar) = 0.006 of the clean latent even at
+# the noisiest step, so in training each channel's spatial average carries a
+# faint copy of that latent's overall level, and the UNet learns to read it -
+# amplified about 158x in its prediction of the clean latent. Pure noise has a
+# random average instead (sd 1/64 per channel), so each seed fixed a random
+# level for the whole root. With the v2 LiteVAE, whose latents average about 0,
+# that cost a share of roots; with v3, whose background sits at -2, it drew the
+# background as tissue for most seeds (12% valid roots). Replacing each
+# channel's spatial average with sqrt(alpha_bar) x the mean training latent
+# took v3 to 79% and v2 to 71% (results/widiv/seed_sweep/, *_dc). The noise
+# keeps its spatial pattern, so a seed still means the same thing everywhere.
+#
+# latent_mean: per-channel mean of the training latents in the UNet's units
+# (scaled, layout channel included), as saved in each checkpoint.
+def matched_start_noise(noise, latent_mean, alpha_bar_start):
+    mean = torch.as_tensor(latent_mean, dtype=noise.dtype, device=noise.device).view(1, -1, 1, 1)
+    return noise - noise.mean((2, 3), keepdim=True) + torch.sqrt(alpha_bar_start) * mean
+
+
+# Per-channel mean of a stack of latents (N, C, H, W) as a plain list, the form
+# checkpoints keep it in.
+def channel_mean(latents):
+    return latents.float().mean((0, 2, 3)).cpu().tolist()
+
+
+# DDIM sampling for WiDiv, as generate_from_dataset.generate_batch but from
+# matched starting noise when latent_mean is given (None = plain noise, as every
+# run before it), and with optional stochastic steps (eta). One noise draw per
+# seed, so a seed gives the same start for every genotype. Returns uint8 images
+# (B, H, W, 3) through the given decoder (a ScaledDecoder for scaled or layout runs).
+def generate_widiv_batch(snp_encoder, unet, scheduler, decoder, snp_batch, seeds, device,
+                         latent_shape, num_steps, latent_mean=None, eta=0.0, decode_batch=4):
+    z_t = torch.stack([torch.randn(*latent_shape, generator=torch.Generator().manual_seed(int(s)))
+                       for s in seeds]).to(device)
+    timesteps = scheduler.get_timesteps(num_steps, device)
+    if latent_mean is not None:
+        z_t = matched_start_noise(z_t, latent_mean, scheduler.alpha_bars[int(timesteps[0])])
+    snp_embedding = snp_encoder(snp_batch)
+    B = z_t.shape[0]
+    for i, t in enumerate(timesteps):
+        t_batch = torch.full((B,), int(t), device=device, dtype=torch.long)
+        t_prev = int(timesteps[i + 1]) if i + 1 < len(timesteps) else -1
+        t_prev_batch = torch.full((B,), t_prev, device=device, dtype=torch.long)
+        z_t = scheduler.denoise_step(z_t, unet(z_t, t_batch, snp_embedding), t_batch,
+                                     t_prev_batch, eta=eta)
+    # Decoded a few at a time: the 512 px decoder is the memory peak on a 4 GB GPU.
+    images = torch.cat([decoder(z_t[i:i + decode_batch], save_steps=False)
+                        for i in range(0, B, decode_batch)])
+    images = torch.clamp((images + 1) / 2, 0, 1)
+    return (images.permute(0, 2, 3, 1).cpu().numpy() * 255).round().astype(np.uint8)
+
+
+# Per-channel mean latent in the UNet's units from a batch of training images
+# (N, 3, H, W), for checkpoints that predate their saved latent_channel_mean.
+# Uses the encoder's mean latent, which has the same average as its samples.
+def encoded_latent_mean(litevae_encoder, images, scaler, layout=False):
+    with torch.no_grad():
+        _, mean, _ = litevae_encoder(images)
+        z = scaler.encode(mean)
+        if layout:
+            z = torch.cat([z, root_layout(images)], 1)
+    return channel_mean(z)

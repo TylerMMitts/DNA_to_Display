@@ -24,6 +24,9 @@
 #   - previews sample from starting noise matched to the training latents'
 #     per-channel mean (widiv_latents.matched_start_noise), saved in every
 #     checkpoint as latent_channel_mean for generation to do the same
+#   - snp_encoding 'windows' swaps the PCA for option F: a few PCs plus gated
+#     windows of SNPs (widiv_window_encoding.py), with a sparsity penalty that
+#     closes windows the model does not need
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -59,14 +62,16 @@ from paths import (
 )
 from widiv_paths import (
     WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
-    WIDIV_LITEVAE_MODEL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SPLIT,
+    WIDIV_LITEVAE_MODEL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SNP_MAP, WIDIV_SPLIT,
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
 from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_genotypes
+from widiv_window_encoding import DosageWindowLayout, GatedDosageWindowEncoder
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.unet import DenoisingUNet
+from latent_diffusion.models.window_encoding import penalty_weight, save_gate_report
 from widiv_latents import (
     LatentScaler, ScaledClampScheduler, ScaledDecoder, channel_mean, generate_widiv_batch, root_layout,
 )
@@ -307,6 +312,8 @@ def main(overrides=None):
 
         genotypes_path = WIDIV_GENOTYPES
         genotype_cache = WIDIV_GENOTYPE_CACHE
+        # SNP chromosomes and positions, for the window encoding's layout.
+        snp_map_path = WIDIV_SNP_MAP
         split_path = WIDIV_SPLIT
         metadata_path = WIDIV_SCALED_METADATA
         # The common-scale images, not the delivered ones (see prepare_widiv_images.py).
@@ -325,6 +332,40 @@ def main(overrides=None):
         # (results/widiv/genetics_profile/). pca_n_components fixes the number instead.
         pca_target_variance = 0.80
         pca_n_components = None
+
+        # How the genotype reaches the UNet:
+        #   'pca'     - option A, the PCA above (widiv_snp_encoding.py)
+        #   'windows' - option F: window_pcs PCs for relatedness plus windows of
+        #               neighbouring SNPs, each with its own learned map and a
+        #               gate a sparsity penalty pushes shut (widiv_window_encoding.py).
+        #               The PCA keeps too little of any one SNP for designed
+        #               genes to move their trait (about 0.4% of designed size).
+        # WIDIV_SNP_ENCODING overrides it.
+        snp_encoding = os.environ.get('WIDIV_SNP_ENCODING', 'pca')
+        # SNPs per window: about 460 windows of 200, none crossing a chromosome.
+        # WIDIV_WINDOW_SIZE overrides it.
+        window_size = int(os.environ.get('WIDIV_WINDOW_SIZE', 200))
+        # PCs kept beside the windows for population structure. WIDIV_WINDOW_PCS overrides it.
+        window_pcs = int(os.environ.get('WIDIV_WINDOW_PCS', 32))
+        # Features each window's SNPs are mapped to.
+        window_dim = 4
+        # Penalty added to the loss per window expected to be open; a window
+        # stays open only if it lowers the denoising loss by more than this.
+        # Scale: the whole genotype is worth about 1% of a loss of 0.06, so
+        # about 6e-4 over ~460 windows, about 1e-6 each. On MEMA roots 1e-4 shut
+        # every window and 1e-6 kept them all (the planted stele test).
+        # WIDIV_WINDOW_SPARSITY overrides it.
+        window_sparsity = float(os.environ.get('WIDIV_WINDOW_SPARSITY', 1e-6))
+        # Every gate held open with no penalty for the warm-up, then the penalty
+        # ramps from 0 to full, as in train_seeds.py: with the full penalty from
+        # the first step every seed window shut before the model had learned to
+        # use any, and a shut gate cannot reopen. WIDIV_WINDOW_WARMUP / _RAMP override them.
+        window_warmup_epochs = int(os.environ.get('WIDIV_WINDOW_WARMUP', 100))
+        window_ramp_epochs = int(os.environ.get('WIDIV_WINDOW_RAMP', 100))
+        # Faster than the network's 1e-4 so gates can settle within the run.
+        window_gate_learning_rate = 1e-3
+        # Warn when more than this share of gates is shut before the ramp ends.
+        window_collapse_warning = 0.9
 
         # Saves sample images for preview during training
         save_previews = True
@@ -406,6 +447,12 @@ def main(overrides=None):
         raise SystemExit(f"latent_target must be 'mean' or 'sample', not {cfg.latent_target!r}")
     if cfg.latent_scaling not in ('channel', 'none'):
         raise SystemExit(f"latent_scaling must be 'channel' or 'none', not {cfg.latent_scaling!r}")
+    if cfg.snp_encoding not in ('pca', 'windows'):
+        raise SystemExit(f"snp_encoding must be 'pca' or 'windows', not {cfg.snp_encoding!r}")
+    windows = cfg.snp_encoding == 'windows'
+    encoding_name = 'widiv_dosage_windows' if windows else 'widiv_dosage_pca'
+    window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
+                       cfg.window_warmup_epochs, cfg.window_ramp_epochs)
     preset = SIZE_PRESETS[size]
     # Mean-latent and scaled runs get their own folders, so no run ever resumes
     # from one trained on different latents (the first runs keep the plain name).
@@ -413,6 +460,8 @@ def main(overrides=None):
                                 + ('_zmean' if cfg.latent_target == 'mean' else '')
                                 + ('_scaled' if cfg.latent_scaling == 'channel' else '')
                                 + ('_layout' if cfg.layout_channel else '')
+                                + (f'_windows{cfg.window_size}_pc{cfg.window_pcs}'
+                                   f'_sp{cfg.window_sparsity:.0e}' if windows else '')
                                 + litevae_tag(cfg.litevae_checkpoint))
     # The UNet's channels: the LiteVAE's, plus the layout channel when it is on.
     unet_channels = cfg.latent_channels + int(cfg.layout_channel)
@@ -457,6 +506,13 @@ def main(overrides=None):
             raise SystemExit(f"{resume_path.name} was trained with layout_channel="
                              f"{bool(resume_ckpt.get('layout_channel', False))}, not "
                              f"{cfg.layout_channel}. Give this run its own run_name.")
+        if resume_ckpt.get('encoding', 'widiv_dosage_pca') != encoding_name:
+            raise SystemExit(f"{resume_path.name} was trained with the {resume_ckpt.get('encoding')} "
+                             f"encoding, not {encoding_name}. Give this run its own run_name.")
+        if windows and tuple(resume_ckpt.get('window_settings', ())) != window_settings:
+            raise SystemExit(f"{resume_path.name} was trained with window size, PCs, features, "
+                             f"sparsity, warm-up and ramp {tuple(resume_ckpt.get('window_settings', ()))}, "
+                             f"not {window_settings}. Give this run its own run_name.")
     elif cfg.resume:
         print(f"\nresume=True but no {run_name}_epoch_N.pt found in save_dir - starting fresh")
     else:
@@ -481,19 +537,33 @@ def main(overrides=None):
           f"({time.time() - t0:.1f}s)")
     row_of = {n: i for i, n in enumerate(line_names)}
 
+    projector_class = DosageWindowLayout if windows else DosagePCAProjector
     if resume_ckpt is not None:
         # Reuses the exact basis already in use rather than refitting.
-        projector = DosagePCAProjector.from_state_dict(resume_ckpt['snp_projector'])
+        projector = projector_class.from_state_dict(resume_ckpt['snp_projector'])
         projector.check_columns(snp_names)
-        print(f"Restored SNP projector from checkpoint: {projector.output_dim} components")
+        print(f"Restored SNP projector from checkpoint: "
+              + (f"{projector.n_windows} windows + {projector.n_pcs} PCs" if windows
+                 else f"{projector.output_dim} components"))
     else:
         fit_rows = [row_of[g] for g in sorted(train_lines) if g in row_of]
-        projector = DosagePCAProjector(n_components=cfg.pca_n_components,
-                                       target_variance=cfg.pca_target_variance)
-        projector.fit(dosage[fit_rows], snp_names)
+        if windows:
+            snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
+            snp_map = snp_map.loc[snp_names]
+            projector = DosageWindowLayout(cfg.window_size, cfg.window_pcs).fit(
+                dosage[fit_rows], snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy())
+            print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "
+                  f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp")
+        else:
+            projector = DosagePCAProjector(n_components=cfg.pca_n_components,
+                                           target_variance=cfg.pca_target_variance)
+            projector.fit(dosage[fit_rows], snp_names)
 
+    # The encoder's input per line: PCA scores, or (windows) the dosage row itself,
+    # kept as int8 - 90,790 values per line - and cast inside the encoder.
     projected = projector.transform(dosage)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(line_names)}
+    snp_dtype = torch.int8 if windows else torch.float32
 
     # Image data and metadata
     image_dir = resolve_input(cfg.image_dir, 'scaled WiDiv image directory')
@@ -538,12 +608,17 @@ def main(overrides=None):
         ProjectedWidivDataset(train_eval_samples, make_transforms(False)),
         batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=pin)
 
-    encoder_config = {
-        'input_dim': projector.output_dim,
-        'embedding_dim': preset['snp_embed_dim'],
-        'num_tokens': cfg.num_tokens,
-        'hidden_dim': preset['encoder_hidden_dim'],
-    }
+    if windows:
+        encoder_config = GatedDosageWindowEncoder.for_layout(
+            projector, window_dim=cfg.window_dim, embedding_dim=preset['snp_embed_dim'],
+            num_tokens=cfg.num_tokens, hidden_dim=preset['encoder_hidden_dim']).config()
+    else:
+        encoder_config = {
+            'input_dim': projector.output_dim,
+            'embedding_dim': preset['snp_embed_dim'],
+            'num_tokens': cfg.num_tokens,
+            'hidden_dim': preset['encoder_hidden_dim'],
+        }
     unet_config = {
         'latent_channels': unet_channels, 'base_channels': preset['base_channels'],
         'snp_embed_dim': preset['snp_embed_dim'], 'd_attention': preset['d_attention'],
@@ -561,14 +636,17 @@ def main(overrides=None):
                 f"  checkpoint: {saved_unet}\n  preset:     {unet_config}\n"
                 "Restore the preset, or move that folder's checkpoints aside to start over.")
 
-    snp_encoder = DosagePCAEncoder(**encoder_config).to(device)
+    snp_encoder = (GatedDosageWindowEncoder if windows else DosagePCAEncoder)(**encoder_config)
     unet = DenoisingUNet(**unet_config).to(device)
     if resume_ckpt is not None:
         snp_encoder.load_state_dict(resume_ckpt['snp_encoder_state_dict'])
         unet.load_state_dict(resume_ckpt['unet_state_dict'])
         print("Restored SNP encoder and UNet weights from the resume checkpoint")
     else:
+        if windows:
+            snp_encoder.set_layout(projector)
         print("UNet initialised from scratch")
+    snp_encoder = snp_encoder.to(device)
     # Keeps attention_history from growing unboundedly during training, each
     # cross-attention block appends to it on every forward pass otherwise.
     unet.set_store_attention(False)
@@ -612,7 +690,7 @@ def main(overrides=None):
 
         train_rows = cached_rows(train_samples)
         train_snp = torch.tensor(np.stack([s['projected'] for s in train_samples]),
-                                 dtype=torch.float32)
+                                 dtype=snp_dtype)
 
     # The latent the UNet trains on, in the LiteVAE's own units: the encoder's
     # mean, or a sample from its distribution as LiteVAEEncoder returns it
@@ -721,9 +799,14 @@ def main(overrides=None):
           f"(UNet {n_unet:,}, SNP encoder {n_encoder:,}); "
           f"{(n_unet + n_encoder) / len(train_samples):,.0f} per training image")
 
-    optimizer = optim.Adam([{'params': ldm.unet.parameters(), 'lr': cfg.learning_rate},
-                            {'params': ldm.snp_encoder.parameters(),
-                             'lr': cfg.snp_encoder_learning_rate}])
+    groups = [{'params': ldm.unet.parameters(), 'lr': cfg.learning_rate}]
+    if windows:
+        groups += [{'params': [p for n, p in ldm.snp_encoder.named_parameters() if n != 'log_alpha'],
+                    'lr': cfg.snp_encoder_learning_rate},
+                   {'params': [ldm.snp_encoder.log_alpha], 'lr': cfg.window_gate_learning_rate}]
+    else:
+        groups += [{'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate}]
+    optimizer = optim.Adam(groups)
     if resume_ckpt is not None:
         optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
         for group in optimizer.param_groups:
@@ -783,7 +866,7 @@ def main(overrides=None):
         preview_dir.mkdir(parents=True, exist_ok=True)
         snp_batch = torch.tensor(
             np.stack([s['projected'] for s in preview_samples for _ in range(cfg.n_preview_seeds)]),
-            dtype=torch.float32, device=device)
+            dtype=snp_dtype, device=device)
         flat_seeds = [s for seeds in preview_seeds for s in seeds]
         with torch.no_grad():
             generated = generate_widiv_batch(snp_encoder, unet, scheduler,
@@ -826,9 +909,9 @@ def main(overrides=None):
                         eval_cache[name].append((
                             sample_latent(cache_mean[r, 0], cache_logvar[r, 0], layout),
                             torch.tensor(np.stack([s['projected'] for s in part]),
-                                         dtype=torch.float32, device=device),
+                                         dtype=snp_dtype, device=device),
                             torch.tensor(np.stack([s['wrong_projected'] for s in part]),
-                                         dtype=torch.float32, device=device)))
+                                         dtype=snp_dtype, device=device)))
                 else:
                     eval_cache[name] = [
                         (encode_for_training(b['image'].to(device)), b['snp'].to(device),
@@ -852,23 +935,52 @@ def main(overrides=None):
         print(f"Resuming at epoch {start_epoch + 1}/{cfg.num_epochs}, "
               f"best validation loss so far {best_val:.4f}")
 
+    collapse_warned = False
     for epoch in range(start_epoch, cfg.num_epochs):
         set_train_mode()
         total = 0.0
+        weight = 0.0
+        if windows:
+            snp_encoder.force_open = epoch < cfg.window_warmup_epochs
+            weight = penalty_weight(epoch, cfg.window_sparsity, cfg.window_warmup_epochs,
+                                    cfg.window_ramp_epochs)
         for z, snp in tqdm(training_batches(), total=n_batches,
                            desc=f"Epoch {epoch + 1}/{cfg.num_epochs}"):
             loss = denoising_loss(z, snp)
+            objective = loss + weight * snp_encoder.expected_open() if weight > 0 else loss
             optimizer.zero_grad()
-            loss.backward()
+            objective.backward()
             torch.nn.utils.clip_grad_norm_(ldm.unet.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(ldm.snp_encoder.parameters(), 1.0)
             optimizer.step()
+            # The denoising loss alone, so the curve stays comparable with PCA runs.
             total += loss.item()
         train_loss = total / max(n_batches, 1)
 
+        # Evaluation uses the learned gates (eval mode), never the warm-up's
+        # forced-open ones, so the genotype gain is what this checkpoint gives.
+        if windows:
+            snp_encoder.force_open = False
         val_loss, val_wrong, val_gain = evaluate('val', val_loader, val_samples)
         train_eval, train_wrong, train_gain = evaluate('train', train_eval_loader,
                                                        train_eval_samples)
+
+        window_stats = {}
+        if windows:
+            snp_encoder.eval()
+            with torch.no_grad():
+                window_stats = {'windows_open': int((snp_encoder.gates() > 0).sum().item()),
+                                'windows_expected_open': float(snp_encoder.expected_open().item()),
+                                'window_penalty': weight}
+            set_train_mode()
+            shut = 1 - window_stats['windows_open'] / projector.n_windows
+            if (not collapse_warned and epoch < cfg.window_warmup_epochs + cfg.window_ramp_epochs
+                    and shut > cfg.window_collapse_warning):
+                collapse_warned = True
+                print(f"  WARNING: {shut:.0%} of window gates are shut at epoch {epoch + 1}, before "
+                      "the penalty ramp has finished. Closed gates cannot reopen, so if the "
+                      "genotype gain is near zero this run has collapsed: lower "
+                      "window_sparsity or lengthen the warm-up and ramp.")
 
         lr_scheduler.step()
         history.append({'epoch': epoch + 1, 'train_loss': train_loss,
@@ -877,10 +989,12 @@ def main(overrides=None):
                         'train_eval_loss_wrong_genotype': train_wrong,
                         'genotype_gain_heldout': val_gain,
                         'genotype_gain_trained': train_gain,
-                        'lr': lr_scheduler.get_last_lr()[0]})
+                        'lr': lr_scheduler.get_last_lr()[0], **window_stats})
         print(f"  train {train_loss:.4f}   val {val_loss:.4f}   "
               f"genotype gain: held-out {val_gain:+.1%}, trained {train_gain:+.1%}   "
-              f"lr {lr_scheduler.get_last_lr()[0]:.2e}")
+              f"lr {lr_scheduler.get_last_lr()[0]:.2e}"
+              + (f"   windows open {window_stats['windows_open']}/{projector.n_windows}"
+                 f"   penalty {weight:.1e}" if windows else ''))
 
         def checkpoint(path, note):
             torch.save({
@@ -896,7 +1010,10 @@ def main(overrides=None):
                 'snp_projector': projector.state_dict(),
                 'snp_encoder_config': encoder_config,
                 'unet_config': unet_config,
-                'encoding': 'widiv_dosage_pca',
+                # widiv_window_encoding.load_widiv_encoder reads either encoding back.
+                'encoding': encoding_name,
+                # (window size, PCs, features per window, sparsity, warm-up, ramp).
+                'window_settings': window_settings if windows else None,
                 'latent_target': cfg.latent_target,
                 # Generation must decode with these: widiv_latents.ScaledDecoder
                 # and LatentScaler.from_checkpoint read them back.
@@ -929,6 +1046,10 @@ def main(overrides=None):
             checkpoint(checkpoint_path(save_dir, epoch + 1, run_name), 'periodic')
             if cfg.save_previews and preview_samples:
                 save_previews(epoch + 1)
+            if windows:
+                n_open = save_gate_report(snp_encoder, projector,
+                                          results_dir / f'window_gates_epoch_{epoch + 1:04d}.csv')
+                print(f"  {n_open} windows open; gate report written")
         if val_loss < best_val:
             best_val = val_loss
             checkpoint(best_path, 'best validation loss')
@@ -944,7 +1065,8 @@ def main(overrides=None):
             'dataset': 'widiv', 'split': split,
             'model_size': size, 'unet_parameters': n_unet,
             'snp_encoder_parameters': n_encoder,
-            'encoding': 'widiv_dosage_pca',
+            'encoding': encoding_name,
+            'window_settings': window_settings if windows else None,
             'latent_target': cfg.latent_target,
             'latent_scaling': cfg.latent_scaling,
             'latent_scaler': scaler.state_dict(),
@@ -953,7 +1075,9 @@ def main(overrides=None):
             'litevae': Path(cfg.litevae_checkpoint).name,
             'litevae_epoch': litevae_epoch,
             'projected_dim': int(projector.output_dim),
-            'pca_variance': float(projector.explained_variance_ratio_.sum()),
+            'pca_variance': float((projector.pca if windows else projector)
+                                  .explained_variance_ratio_.sum()),
+            'windows': projector.n_windows if windows else None,
             'train_lines': len({s['genotype'] for s in train_samples}),
             'val_lines': len(val_lines), 'test_lines': len(test_lines),
             'train_images': len(train_samples),

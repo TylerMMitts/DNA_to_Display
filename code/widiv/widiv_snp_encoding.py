@@ -22,6 +22,7 @@ import gzip
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from latent_diffusion.models.snp_encoding import OneHotSNPEncoder
 
@@ -59,6 +60,20 @@ def load_widiv_genotypes(csv_path, cache_path=None):
     return lines, snps, dosage
 
 
+# Matrix columns of the designed QTL, and of every SNP within flank_kb of one on the
+# same chromosome (flank_kb = 0: the QTL alone), for the leave-the-QTL-out runs.
+def qtl_columns(snp_names, qtl_path, snp_map_path, flank_kb=0):
+    qtl = pd.read_csv(qtl_path)
+    column = {s: i for i, s in enumerate(snp_names)}
+    qtl_cols = np.array(sorted({column[s] for s in qtl.snp}), dtype=np.int64)
+    snp_map = pd.read_csv(snp_map_path).set_index('snp').loc[list(snp_names)]
+    chrom, pos = snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy()
+    removed = np.zeros(len(snp_names), bool)
+    for c in qtl_cols:
+        removed |= (chrom == chrom[c]) & (np.abs(pos - pos[c]) <= flank_kb * 1000)
+    return np.flatnonzero(removed), qtl_cols
+
+
 class DosagePCAProjector:
 
     def __init__(self, n_components=None, target_variance=0.80):
@@ -82,7 +97,12 @@ class DosagePCAProjector:
             z[missing] = 0.0
         return z
 
-    def fit(self, dosage, snp_names=None, verbose=True):
+    # exclude_columns: SNP columns the PCA never sees. Their loadings come out exactly
+    # 0, so every later genotype matrix keeps its full width and changing one of these
+    # SNPs changes nothing. orthogonalize_columns: SNPs whose linear signal is also
+    # subtracted from the scores, by regression on the fitting lines; see transform.
+    def fit(self, dosage, snp_names=None, verbose=True, exclude_columns=None,
+            orthogonalize_columns=None):
         x = np.asarray(dosage, dtype=np.float32)
         n, p = x.shape
         observed = x >= 0
@@ -98,6 +118,9 @@ class DosagePCAProjector:
         # 90,790-column matrix, which runs out of memory on a laptop. If
         # Z Z' = U S^2 U', the loadings are U' Z / S.
         z = self._standardize(x)
+        kept_out = z[:, orthogonalize_columns].copy() if orthogonalize_columns is not None else None
+        if exclude_columns is not None:
+            z[:, exclude_columns] = 0.0
         gram = z @ z.T
         lam, u = np.linalg.eigh(gram.astype(np.float64))
         order = np.argsort(lam)[::-1]
@@ -112,6 +135,13 @@ class DosagePCAProjector:
         # float32 throughout: float64 eigenvectors would promote the product to
         # a float64 lines x SNPs array, 0.5 GB more for no useful precision.
         self.components_ = (u[:, :k].T.astype(np.float32) @ z) / s[:k, None].astype(np.float32)
+        self.excluded_columns_ = (np.asarray(exclude_columns, dtype=np.int64)
+                                  if exclude_columns is not None else None)
+        self.orthogonalize_columns_, self.orthogonalize_weights_ = None, None
+        if kept_out is not None:
+            self.orthogonalize_columns_ = np.asarray(orthogonalize_columns, dtype=np.int64)
+            self.orthogonalize_weights_ = np.linalg.lstsq(
+                kept_out, z @ self.components_.T, rcond=None)[0].astype(np.float32)
         del z
         self.explained_variance_ratio_ = ratio[:k]
         self.explained_variance_ = lam[:k] / max(n - 1, 1)
@@ -124,8 +154,17 @@ class DosagePCAProjector:
         if self.components_ is None:
             raise RuntimeError("DosagePCAProjector must be fitted before transform")
         dosage = np.atleast_2d(np.asarray(dosage))
-        out = [self._standardize(dosage[i:i + chunk_size]) @ self.components_.T
-               for i in range(0, len(dosage), chunk_size)]
+        out = []
+        for i in range(0, len(dosage), chunk_size):
+            z = self._standardize(dosage[i:i + chunk_size])
+            scores = z @ self.components_.T
+            # Removing SNPs is not enough to hide them: relatives share them, so the
+            # other SNPs' PCs still predict a designed QTL almost as well (R^2 0.37
+            # with the 40 QTL gone, 0.32 with +/-5 Mb around each gone). This takes
+            # out what the scores can linearly say about these SNPs.
+            if getattr(self, 'orthogonalize_columns_', None) is not None:
+                scores = scores - z[:, self.orthogonalize_columns_] @ self.orthogonalize_weights_
+            out.append(scores)
         return np.concatenate(out, axis=0)
 
     @property
@@ -146,6 +185,9 @@ class DosagePCAProjector:
             # Saved so a checkpoint can never be applied to a matrix whose
             # columns are in a different order.
             'snp_names': self.snp_names,
+            'excluded_columns': getattr(self, 'excluded_columns_', None),
+            'orthogonalize_columns': getattr(self, 'orthogonalize_columns_', None),
+            'orthogonalize_weights': getattr(self, 'orthogonalize_weights_', None),
         }
 
     @classmethod
@@ -158,6 +200,9 @@ class DosagePCAProjector:
         obj.explained_variance_ratio_ = np.asarray(state['explained_variance_ratio'])
         obj.explained_variance_ = np.asarray(state['explained_variance'])
         obj.snp_names = state.get('snp_names')
+        obj.excluded_columns_ = state.get('excluded_columns')
+        obj.orthogonalize_columns_ = state.get('orthogonalize_columns')
+        obj.orthogonalize_weights_ = state.get('orthogonalize_weights')
         return obj
 
     def check_columns(self, snp_names):

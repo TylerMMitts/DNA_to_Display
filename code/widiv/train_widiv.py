@@ -62,11 +62,11 @@ from paths import (
 )
 from widiv_paths import (
     WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
-    WIDIV_LITEVAE_MODEL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SNP_MAP, WIDIV_SPLIT,
+    WIDIV_LITEVAE_MODEL, WIDIV_QTL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SNP_MAP, WIDIV_SPLIT,
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
-from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_genotypes
+from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_genotypes, qtl_columns
 from widiv_window_encoding import DosageWindowLayout, GatedDosageWindowEncoder
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
@@ -333,6 +333,19 @@ def main(overrides=None):
         pca_target_variance = 0.80
         pca_n_components = None
 
+        # Leave the designed QTL out of the genotype, to see how much the model leans
+        # on them. exclude_qtl_kb: the PCA never sees the 40 QTL SNPs (0), or those plus
+        # every SNP within this many kb of one; None keeps them all. orthogonalize_qtl:
+        # also subtract from the scores whatever they can linearly say about the QTL
+        # (DosagePCAProjector.transform). Without it the test is weak: relatives share
+        # the QTL, so the remaining PCs still predict them nearly as well (R^2 0.37 vs
+        # 0.375 with the 40 SNPs gone; results/widiv/genetics_profile/qtl_removal_check.csv).
+        # WIDIV_EXCLUDE_QTL_KB and WIDIV_ORTHOGONALIZE_QTL=1 override them.
+        qtl_path = WIDIV_QTL
+        exclude_qtl_kb = (int(os.environ['WIDIV_EXCLUDE_QTL_KB'])
+                          if os.environ.get('WIDIV_EXCLUDE_QTL_KB') else None)
+        orthogonalize_qtl = os.environ.get('WIDIV_ORTHOGONALIZE_QTL', '0') == '1'
+
         # How the genotype reaches the UNet:
         #   'pca'     - option A, the PCA above (widiv_snp_encoding.py)
         #   'windows' - option F: window_pcs PCs for relatedness plus windows of
@@ -426,7 +439,9 @@ def main(overrides=None):
         snp_encoder_learning_rate = 1e-4
         # About 180 optimiser steps per epoch at this batch size, against about
         # 23 for seeds, so 400 epochs is about three times the seed run in steps.
-        num_epochs = 400
+        # The v3 random and cluster models ran 500, which also sets the cosine learning
+        # rate, so a comparison run needs the same. WIDIV_NUM_EPOCHS overrides it.
+        num_epochs = int(os.environ.get('WIDIV_NUM_EPOCHS', 400))
         batch_size = 16
         num_workers = 8
         image_size = WIDIV_IMAGE_SIZE
@@ -450,6 +465,9 @@ def main(overrides=None):
     if cfg.snp_encoding not in ('pca', 'windows'):
         raise SystemExit(f"snp_encoding must be 'pca' or 'windows', not {cfg.snp_encoding!r}")
     windows = cfg.snp_encoding == 'windows'
+    if windows and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
+        raise SystemExit("leaving the QTL out is only implemented for snp_encoding='pca'")
+    qtl_removal = {'exclude_qtl_kb': cfg.exclude_qtl_kb, 'orthogonalize_qtl': cfg.orthogonalize_qtl}
     encoding_name = 'widiv_dosage_windows' if windows else 'widiv_dosage_pca'
     window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
                        cfg.window_warmup_epochs, cfg.window_ramp_epochs)
@@ -462,6 +480,8 @@ def main(overrides=None):
                                 + ('_layout' if cfg.layout_channel else '')
                                 + (f'_windows{cfg.window_size}_pc{cfg.window_pcs}'
                                    f'_sp{cfg.window_sparsity:.0e}' if windows else '')
+                                + (f'_noqtl{cfg.exclude_qtl_kb}kb' if cfg.exclude_qtl_kb is not None else '')
+                                + ('_orth' if cfg.orthogonalize_qtl else '')
                                 + litevae_tag(cfg.litevae_checkpoint))
     # The UNet's channels: the LiteVAE's, plus the layout channel when it is on.
     unet_channels = cfg.latent_channels + int(cfg.layout_channel)
@@ -509,6 +529,10 @@ def main(overrides=None):
         if resume_ckpt.get('encoding', 'widiv_dosage_pca') != encoding_name:
             raise SystemExit(f"{resume_path.name} was trained with the {resume_ckpt.get('encoding')} "
                              f"encoding, not {encoding_name}. Give this run its own run_name.")
+        saved_removal = resume_ckpt.get('qtl_removal') or {'exclude_qtl_kb': None, 'orthogonalize_qtl': False}
+        if saved_removal != qtl_removal:
+            raise SystemExit(f"{resume_path.name} was trained with QTL removal {saved_removal}, not "
+                             f"{qtl_removal}. Give this run its own run_name.")
         if windows and tuple(resume_ckpt.get('window_settings', ())) != window_settings:
             raise SystemExit(f"{resume_path.name} was trained with window size, PCs, features, "
                              f"sparsity, warm-up and ramp {tuple(resume_ckpt.get('window_settings', ()))}, "
@@ -555,9 +579,19 @@ def main(overrides=None):
             print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "
                   f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp")
         else:
+            exclude, orthogonalize = None, None
+            if cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl:
+                removed, qtl_cols = qtl_columns(
+                    snp_names, resolve_input(cfg.qtl_path, 'WiDiv QTL table'),
+                    resolve_input(cfg.snp_map_path, 'WiDiv SNP map'), cfg.exclude_qtl_kb or 0)
+                exclude = removed if cfg.exclude_qtl_kb is not None else None
+                orthogonalize = qtl_cols if cfg.orthogonalize_qtl else None
+                print(f"  leaving QTL out: {0 if exclude is None else len(exclude):,} SNPs removed, "
+                      f"{0 if orthogonalize is None else len(orthogonalize)} QTL orthogonalized")
             projector = DosagePCAProjector(n_components=cfg.pca_n_components,
                                            target_variance=cfg.pca_target_variance)
-            projector.fit(dosage[fit_rows], snp_names)
+            projector.fit(dosage[fit_rows], snp_names, exclude_columns=exclude,
+                          orthogonalize_columns=orthogonalize)
 
     # The encoder's input per line: PCA scores, or (windows) the dosage row itself,
     # kept as int8 - 90,790 values per line - and cast inside the encoder.
@@ -1014,6 +1048,7 @@ def main(overrides=None):
                 'encoding': encoding_name,
                 # (window size, PCs, features per window, sparsity, warm-up, ramp).
                 'window_settings': window_settings if windows else None,
+                'qtl_removal': qtl_removal,
                 'latent_target': cfg.latent_target,
                 # Generation must decode with these: widiv_latents.ScaledDecoder
                 # and LatentScaler.from_checkpoint read them back.
@@ -1067,6 +1102,7 @@ def main(overrides=None):
             'snp_encoder_parameters': n_encoder,
             'encoding': encoding_name,
             'window_settings': window_settings if windows else None,
+            'qtl_removal': qtl_removal,
             'latent_target': cfg.latent_target,
             'latent_scaling': cfg.latent_scaling,
             'latent_scaler': scaler.state_dict(),

@@ -35,6 +35,10 @@
 #
 # Weights go to models/diffusion_widiv_<size>_<split>/, previews and loss
 # history to results/training/diffusion_widiv_<size>_<split>/.
+#
+# WIDIV_DATASET=ril_v5 trains the same model on the biparental RIL set instead
+# (widiv_paths.py): models/diffusion_ril_v5_<size>_<split>... and so on, with
+# epoch defaults scaled to that set's one image per line (DATASET_DEFAULTS).
 
 import json
 import os
@@ -61,7 +65,7 @@ from paths import (
     resolve_input, resolve_output,
 )
 from widiv_paths import (
-    WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
+    WIDIV_DATASET, WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
     WIDIV_LITEVAE_MODEL, WIDIV_QTL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SNP_MAP, WIDIV_SPLIT,
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
@@ -79,7 +83,26 @@ from latent_diffusion.generation.generate_from_dataset import load_original, sav
 
 # Every checkpoint this script writes is prefixed with this, so a stray .pt file
 # still says which model produced it once it has been copied elsewhere.
-MODEL_NAME = 'diffusion_widiv'
+MODEL_NAME = f'diffusion_{WIDIV_DATASET}'
+
+# Settings that differ by dataset.
+#
+# Epochs, and the window encoding's warm-up and ramp: a WiDiv epoch is about 183
+# optimiser steps (about 2,930 images from 733 lines), a RIL epoch about 111
+# (one image each from about 1,780 lines). The RIL values keep the step counts
+# of the WiDiv v3 runs: 500 epochs (the length those ran) and a 100 + 100 epoch
+# warm-up and ramp.
+#
+# PCA size: both are set the same way, at the variance where ridge regression on
+# the PCs predicts as well as on every marker. WiDiv: 80% (369 PCs; 400 PCs
+# matched GBLUP). The RIL is one cross, so long shared blocks make its markers
+# far more redundant: 80% is only 33 PCs, which fall well short (mean r over the
+# seven traits on validation lines 0.567, against 0.654 on all 10,000 markers),
+# and 95% is 124 PCs at 0.650.
+DATASET_DEFAULTS = {
+    'widiv':  {'epochs': 400, 'window_warmup': 100, 'window_ramp': 100, 'pca_variance': 0.80},
+    'ril_v5': {'epochs': 800, 'window_warmup': 160, 'window_ramp': 160, 'pca_variance': 0.95},
+}[WIDIV_DATASET]
 
 # Same presets as the root and seed trainers. WiDiv has about 3,000 training
 # images from about 730 lines once validation lines are set aside: 1.6 times
@@ -275,7 +298,7 @@ def load_or_build_layout_cache(image_dir, filenames, image_size, batch_images, n
 # resumes from, or overwrites, one on an old space.
 def litevae_tag(litevae_checkpoint):
     folder = Path(litevae_checkpoint).parent.name
-    return '' if folder == 'litevae_widiv_v2' else '_' + folder.replace('litevae_widiv_', 'vae')
+    return '' if folder == 'litevae_widiv_v2' else '_' + folder.replace(f'litevae_{WIDIV_DATASET}_', 'vae')
 
 
 # Finds the newest checkpoint to resume from, or None if the folder holds none.
@@ -286,11 +309,12 @@ def find_resumable_checkpoint(save_dir, run_name):
         return None
 
 
-# 'random' and 'cluster' are accepted for the two delivered split columns.
+# 'random' and 'cluster' are accepted for the delivered split columns (the RIL
+# has only split_random).
 def split_column(name):
     name = name if name.startswith('split_') else f'split_{name}'
     if name not in SPLITS:
-        raise SystemExit(f"split must be one of {SPLITS}, not {name!r}")
+        raise SystemExit(f"split must be one of {SPLITS} for {WIDIV_DATASET}, not {name!r}")
     return name
 
 
@@ -329,8 +353,9 @@ def main(overrides=None):
         # PCA size. 0.80 of the training lines' variance is 369 components for
         # split_random and 340 for split_cluster: on this data ridge regression
         # on about 400 PCs matched GBLUP and 168 fell short
-        # (results/widiv/genetics_profile/). pca_n_components fixes the number instead.
-        pca_target_variance = 0.80
+        # (results/widiv/genetics_profile/). The RIL uses 0.95 (DATASET_DEFAULTS
+        # says why). pca_n_components fixes the number instead.
+        pca_target_variance = DATASET_DEFAULTS['pca_variance']
         pca_n_components = None
 
         # Leave the designed QTL out of the genotype, to see how much the model leans
@@ -373,8 +398,9 @@ def main(overrides=None):
         # ramps from 0 to full, as in train_seeds.py: with the full penalty from
         # the first step every seed window shut before the model had learned to
         # use any, and a shut gate cannot reopen. WIDIV_WINDOW_WARMUP / _RAMP override them.
-        window_warmup_epochs = int(os.environ.get('WIDIV_WINDOW_WARMUP', 100))
-        window_ramp_epochs = int(os.environ.get('WIDIV_WINDOW_RAMP', 100))
+        # Defaults per dataset in DATASET_DEFAULTS.
+        window_warmup_epochs = int(os.environ.get('WIDIV_WINDOW_WARMUP', DATASET_DEFAULTS['window_warmup']))
+        window_ramp_epochs = int(os.environ.get('WIDIV_WINDOW_RAMP', DATASET_DEFAULTS['window_ramp']))
         # Faster than the network's 1e-4 so gates can settle within the run.
         window_gate_learning_rate = 1e-3
         # Warn when more than this share of gates is shut before the ramp ends.
@@ -440,8 +466,9 @@ def main(overrides=None):
         # About 180 optimiser steps per epoch at this batch size, against about
         # 23 for seeds, so 400 epochs is about three times the seed run in steps.
         # The v3 random and cluster models ran 500, which also sets the cosine learning
-        # rate, so a comparison run needs the same. WIDIV_NUM_EPOCHS overrides it.
-        num_epochs = int(os.environ.get('WIDIV_NUM_EPOCHS', 400))
+        # rate, so a comparison run needs the same. The RIL default (800) is the
+        # same number of steps as those 500 (DATASET_DEFAULTS). WIDIV_NUM_EPOCHS overrides it.
+        num_epochs = int(os.environ.get('WIDIV_NUM_EPOCHS', DATASET_DEFAULTS['epochs']))
         batch_size = 16
         num_workers = 8
         image_size = WIDIV_IMAGE_SIZE
@@ -467,6 +494,9 @@ def main(overrides=None):
     windows = cfg.snp_encoding == 'windows'
     if windows and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
         raise SystemExit("leaving the QTL out is only implemented for snp_encoding='pca'")
+    if (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl) and cfg.qtl_path is None:
+        raise SystemExit(f"{WIDIV_DATASET} has no QTL table (the sender holds it back), "
+                         "so the QTL cannot be left out")
     qtl_removal = {'exclude_qtl_kb': cfg.exclude_qtl_kb, 'orthogonalize_qtl': cfg.orthogonalize_qtl}
     encoding_name = 'widiv_dosage_windows' if windows else 'widiv_dosage_pca'
     window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
@@ -601,8 +631,14 @@ def main(overrides=None):
 
     # Image data and metadata
     image_dir = resolve_input(cfg.image_dir, 'scaled WiDiv image directory')
+    # Only which image belongs to which line. The table also carries every
+    # plot's measured traits (for analysis); training never loads them, so the
+    # model learns from images and genotypes alone. True genetic values and the
+    # designed QTL are never read here either (the QTL only by the deliberate
+    # leave-the-QTL-out runs above, to remove them).
     metadata = pd.read_csv(resolve_input(cfg.metadata_path, 'scaled WiDiv metadata '
-                                         '(run prepare_widiv_images.py)'))
+                                         '(run prepare_widiv_images.py)'),
+                           usecols=['scaled_filename', 'genotype'])
     train_samples, no_snp, no_file = build_samples(metadata, image_dir, projected_by_genotype,
                                                    train_lines)
     val_samples, v_no_snp, v_no_file = build_samples(metadata, image_dir, projected_by_genotype,
@@ -1072,7 +1108,7 @@ def main(overrides=None):
                 'latent_size': cfg.preview_latent_size,
                 # Says which dataset this came from, so a WiDiv checkpoint copied
                 # next to a root one still identifies itself.
-                'dataset': 'widiv',
+                'dataset': WIDIV_DATASET,
                 'genotype_gain_heldout': val_gain,
                 'genotype_gain_trained': train_gain,
             }, path)
@@ -1097,7 +1133,7 @@ def main(overrides=None):
 
     with open(results_dir / 'run_summary.json', 'w') as f:
         json.dump({
-            'dataset': 'widiv', 'split': split,
+            'dataset': WIDIV_DATASET, 'split': split,
             'model_size': size, 'unet_parameters': n_unet,
             'snp_encoder_parameters': n_encoder,
             'encoding': encoding_name,

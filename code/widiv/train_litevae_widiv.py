@@ -20,6 +20,10 @@
 # Run prepare_widiv_images.py first. Weights go to models/litevae_widiv_v3/,
 # reconstructions and loss curves to results/training/litevae_widiv_v3/. Resumes
 # from the newest checkpoint if one exists.
+#
+# WIDIV_DATASET=ril_v5 trains the same recipe on the RIL images, into
+# models/litevae_ril_v5_v3/. The RIL has only split_random, so "training lines
+# under both splits" is its 1,979 training lines.
 
 import json
 import sys
@@ -45,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from paths import (pick_device, TRAINING_RESULTS_DIR, best_checkpoint_path, checkpoint_path,
                    find_latest_checkpoint, resolve_input, resolve_output)
-from widiv_paths import (WIDIV_IMAGE_SIZE, WIDIV_LITEVAE_DIR, WIDIV_SCALED_DIR,
+from widiv_paths import (WIDIV_DATASET, WIDIV_IMAGE_SIZE, WIDIV_LITEVAE_DIR, WIDIV_SCALED_DIR,
                          WIDIV_SCALED_METADATA, WIDIV_SPLIT)
 from widiv_data import SPLITS, load_split, make_transforms
 from widiv_litevae import LinearOutputLiteVAEDecoder, ScaleFreeLiteVAEEncoder
@@ -172,7 +176,9 @@ def main():
         num_blocks = 3
         num_res_blocks = 2
 
-        num_epochs = 250
+        # WiDiv: 250 epochs of about 285 steps. The RIL has about 1,780 training
+        # images (one per line) against about 2,280, so 320 epochs keep the steps.
+        num_epochs = {'widiv': 250, 'ril_v5': 320}[WIDIV_DATASET]
         # Half the seed autoencoder's 16: each image is four times the pixels.
         batch_size = 8
         learning_rate = 1e-4
@@ -214,8 +220,11 @@ def main():
     # Only lines that are training lines under both splits.
     split = load_split(resolve_input(cfg.split_path, 'WiDiv train/test split'))
     train_both = set(split.index[np.logical_and.reduce([split[s] == 'train' for s in SPLITS])])
+    # Only which image belongs to which line; the measured traits in the same
+    # table are never loaded for training.
     meta = pd.read_csv(resolve_input(cfg.metadata_path, 'scaled WiDiv metadata '
-                                     '(run prepare_widiv_images.py)'))
+                                     '(run prepare_widiv_images.py)'),
+                       usecols=['scaled_filename', 'genotype'])
     meta = meta[meta.genotype.isin(train_both)]
     paths = sorted(image_dir / f for f in meta.scaled_filename if (image_dir / f).exists())
     if not paths:

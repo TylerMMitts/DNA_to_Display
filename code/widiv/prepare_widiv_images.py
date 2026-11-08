@@ -51,7 +51,8 @@ def process(name):
             # at the sharp vessel edges, which LANCZOS would add at this ratio.
             canvas, _ = place(im.convert('RGB'), Image.BOX, BACKGROUND)
             canvas.save(out_img)
-    if src_mask.exists() and not out_mask.exists():
+    # A mask delivered empty (0 bytes) counts as no mask.
+    if src_mask.exists() and src_mask.stat().st_size > 0 and not out_mask.exists():
         with Image.open(src_mask) as m:
             canvas, _ = place(m.convert('L'), Image.NEAREST, 0)
             canvas.save(out_mask)
@@ -64,6 +65,10 @@ def main():
     WIDIV_SCALED_MASKS_DIR.mkdir(parents=True, exist_ok=True)
     table = pd.read_csv(WIDIV_PLOT_TABLE)
     names = table.filename.tolist()
+    # An image wider than the canvas would be cropped by the paste.
+    if table.canvas_px.max() > WIDIV_CANVAS_PX:
+        raise SystemExit(f"largest image is {table.canvas_px.max()} px, more than the "
+                         f"{WIDIV_CANVAS_PX} px canvas - raise WIDIV_CANVAS_PX in widiv_paths.py")
     print(f'{len(names)} images -> {WIDIV_IMAGE_SIZE} px at '
           f'{WIDIV_PIXEL_SIZE_UM / SCALE:.3f} um per pixel, into {WIDIV_SCALED_DIR}')
 

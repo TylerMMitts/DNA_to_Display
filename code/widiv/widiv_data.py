@@ -5,7 +5,11 @@ import pandas as pd
 import torch
 from torchvision import transforms
 
-SPLITS = ('split_random', 'split_cluster')
+from widiv_paths import WIDIV_SPLITS
+
+# The split columns this dataset was delivered with: both for WiDiv, only
+# split_random for the RIL (widiv_paths.py).
+SPLITS = WIDIV_SPLITS
 
 
 # A cross-section has no up, down, left or right: the root is radially
@@ -28,9 +32,11 @@ def make_transforms(augment):
                                       RandomQuarterTurn()])
 
 
-# The delivered split: line -> 'train' / 'test' under both splits, and its cluster.
+# The delivered split: line -> 'train' / 'test' under each split (WiDiv also
+# gives each line's cluster). The RIL file names its line column 'line'.
 def load_split(path):
-    return pd.read_csv(path).set_index('genotype')
+    table = pd.read_csv(path)
+    return table.rename(columns={'line': 'genotype'}).set_index('genotype')
 
 
 # Validation lines for checkpoint selection and the per-epoch genotype gain,

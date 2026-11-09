@@ -27,6 +27,9 @@
 #   - snp_encoding 'windows' swaps the PCA for option F: a few PCs plus gated
 #     windows of SNPs (widiv_window_encoding.py), with a sparsity penalty that
 #     closes windows the model does not need
+#   - snp_encoding 'hybrid' adds tokens from an out-of-fold genomic prediction
+#     of each line's image to the 'windows' tokens, which are dropped for half
+#     the training samples (widiv_hybrid_encoding.py)
 #
 # The UNet presets are the root and seed ones. It is fully convolutional, so
 # the parameter counts are unchanged at 64x64; each level is twice the size
@@ -72,6 +75,7 @@ from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
 from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_genotypes, qtl_columns
 from widiv_window_encoding import DosageWindowLayout, GatedDosageWindowEncoder
+from widiv_hybrid_encoding import HybridDosageEncoder, HybridLayout, tissue_layout_summary
 
 from latent_diffusion.models.ldm import LatentDiffusionModel
 from latent_diffusion.models.unet import DenoisingUNet
@@ -387,8 +391,20 @@ def main(overrides=None):
         #               gate a sparsity penalty pushes shut (widiv_window_encoding.py).
         #               The PCA keeps too little of any one SNP for designed
         #               genes to move their trait (about 0.4% of designed size).
+        #   'hybrid'  - out-of-fold genomic prediction of each line's image
+        #               (a tissue-layout summary) as its own tokens, plus the
+        #               'windows' tokens, dropped for a share of training samples
+        #               (widiv_hybrid_encoding.py). Aimed at the UNet learning
+        #               each training image's noise along with its genetics.
+        #               Uses the window settings below as well.
         # WIDIV_SNP_ENCODING overrides it.
         snp_encoding = os.environ.get('WIDIV_SNP_ENCODING', 'pca')
+        # Hybrid only: summary PCs predicted from the genotype (WIDIV_HYBRID_SUMMARY_PCS),
+        # the share of training samples whose window tokens are replaced by null
+        # tokens (WIDIV_HYBRID_WINDOW_DROPOUT), and the number of summary tokens.
+        hybrid_summary_pcs = int(os.environ.get('WIDIV_HYBRID_SUMMARY_PCS', 256))
+        hybrid_window_dropout = float(os.environ.get('WIDIV_HYBRID_WINDOW_DROPOUT', 0.5))
+        hybrid_summary_tokens = 8
         # SNPs per window: about 460 windows of 200, none crossing a chromosome.
         # WIDIV_WINDOW_SIZE overrides it.
         window_size = int(os.environ.get('WIDIV_WINDOW_SIZE', 200))
@@ -505,9 +521,11 @@ def main(overrides=None):
         raise SystemExit(f"latent_target must be 'mean' or 'sample', not {cfg.latent_target!r}")
     if cfg.latent_scaling not in ('channel', 'none'):
         raise SystemExit(f"latent_scaling must be 'channel' or 'none', not {cfg.latent_scaling!r}")
-    if cfg.snp_encoding not in ('pca', 'windows'):
-        raise SystemExit(f"snp_encoding must be 'pca' or 'windows', not {cfg.snp_encoding!r}")
-    windows = cfg.snp_encoding == 'windows'
+    if cfg.snp_encoding not in ('pca', 'windows', 'hybrid'):
+        raise SystemExit(f"snp_encoding must be 'pca', 'windows' or 'hybrid', not {cfg.snp_encoding!r}")
+    # The hybrid contains the windows encoder, so everything about gates applies to it too.
+    hybrid = cfg.snp_encoding == 'hybrid'
+    windows = cfg.snp_encoding in ('windows', 'hybrid')
     if windows and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
         raise SystemExit("leaving the QTL out is only implemented for snp_encoding='pca'")
     if cfg.pca_match_heldout and (windows or cfg.orthogonalize_qtl):
@@ -517,9 +535,12 @@ def main(overrides=None):
         raise SystemExit(f"{WIDIV_DATASET} has no QTL table (the sender holds it back), "
                          "so the QTL cannot be left out")
     qtl_removal = {'exclude_qtl_kb': cfg.exclude_qtl_kb, 'orthogonalize_qtl': cfg.orthogonalize_qtl}
-    encoding_name = 'widiv_dosage_windows' if windows else 'widiv_dosage_pca'
+    encoding_name = ('widiv_dosage_hybrid' if hybrid else 'widiv_dosage_windows' if windows
+                     else 'widiv_dosage_pca')
     window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
                        cfg.window_warmup_epochs, cfg.window_ramp_epochs)
+    hybrid_settings = ((cfg.hybrid_summary_pcs, cfg.hybrid_window_dropout, cfg.hybrid_summary_tokens)
+                       if hybrid else None)
     preset = SIZE_PRESETS[size]
     # Mean-latent and scaled runs get their own folders, so no run ever resumes
     # from one trained on different latents (the first runs keep the plain name).
@@ -529,6 +550,8 @@ def main(overrides=None):
                                 + ('_layout' if cfg.layout_channel else '')
                                 + (f'_windows{cfg.window_size}_pc{cfg.window_pcs}'
                                    f'_sp{cfg.window_sparsity:.0e}' if windows else '')
+                                + (f'_hybrid{cfg.hybrid_summary_pcs}_drop{cfg.hybrid_window_dropout:g}'
+                                   if hybrid else '')
                                 + (f'_pca{round(cfg.pca_target_variance * 100)}'
                                    if not windows and cfg.pca_n_components is None
                                    and cfg.pca_target_variance != DATASET_DEFAULTS['pca_variance'] else '')
@@ -595,6 +618,10 @@ def main(overrides=None):
             raise SystemExit(f"{resume_path.name} was trained with window size, PCs, features, "
                              f"sparsity, warm-up and ramp {tuple(resume_ckpt.get('window_settings', ()))}, "
                              f"not {window_settings}. Give this run its own run_name.")
+        saved_hybrid = resume_ckpt.get('hybrid_settings')
+        if (tuple(saved_hybrid) if saved_hybrid else None) != hybrid_settings:
+            raise SystemExit(f"{resume_path.name} was trained with hybrid settings {saved_hybrid}, "
+                             f"not {hybrid_settings}. Give this run its own run_name.")
     elif cfg.resume:
         print(f"\nresume=True but no {run_name}_epoch_N.pt found in save_dir - starting fresh")
     else:
@@ -619,17 +646,43 @@ def main(overrides=None):
           f"({time.time() - t0:.1f}s)")
     row_of = {n: i for i, n in enumerate(line_names)}
 
-    projector_class = DosageWindowLayout if windows else DosagePCAProjector
+    projector_class = HybridLayout if hybrid else DosageWindowLayout if windows else DosagePCAProjector
     if resume_ckpt is not None:
         # Reuses the exact basis already in use rather than refitting.
         projector = projector_class.from_state_dict(resume_ckpt['snp_projector'])
         projector.check_columns(snp_names)
         print(f"Restored SNP projector from checkpoint: "
               + (f"{projector.n_windows} windows + {projector.n_pcs} PCs" if windows
-                 else f"{projector.output_dim} components"))
+                 else f"{projector.output_dim} components")
+              + (f" + {projector.summary_pcs} predicted image-summary PCs" if hybrid else ""))
     else:
         fit_rows = [row_of[g] for g in sorted(train_lines) if g in row_of]
-        if windows:
+        if hybrid:
+            # Each training line's image summary (mean over its images), from the
+            # images alone; validation and test images are never read here.
+            snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
+            snp_map = snp_map.loc[snp_names]
+            files = pd.read_csv(resolve_input(cfg.metadata_path, 'scaled WiDiv metadata'),
+                                usecols=['scaled_filename', 'genotype'])
+            files = files[files.genotype.isin(train_lines)]
+            folder = resolve_input(cfg.image_dir, 'scaled WiDiv image directory')
+            t1 = time.time()
+            per_image = {}
+            for f, g in zip(files.scaled_filename, files.genotype):
+                path = folder / f
+                if path.exists():
+                    rgb = torch.from_numpy(np.asarray(Image.open(path).convert('RGB')).copy()).to(device)
+                    per_image.setdefault(g, []).append(tissue_layout_summary(rgb))
+            summaries = {g: np.mean(v, axis=0) for g, v in per_image.items()}
+            print(f"  hybrid: image summaries of {sum(map(len, per_image.values()))} training images "
+                  f"({time.time() - t1:.0f}s)")
+            projector = HybridLayout(cfg.window_size, cfg.window_pcs, cfg.hybrid_summary_pcs).fit(
+                dosage, fit_rows, snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy(),
+                line_names, summaries)
+            print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "
+                  f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp; "
+                  f"window tokens dropped for {cfg.hybrid_window_dropout:.0%} of training samples")
+        elif windows:
             snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
             snp_map = snp_map.loc[snp_names]
             projector = DosageWindowLayout(cfg.window_size, cfg.window_pcs).fit(
@@ -656,9 +709,11 @@ def main(overrides=None):
     # The encoder's input per line: PCA scores, or (windows) the dosage row itself,
     # kept as int8 - 90,790 values per line - and cast inside the encoder. With
     # pca_match_heldout the training lines' scores are shrunk (project_lines).
+    # Hybrid: the dosage row followed by the predicted image summary, as float16
+    # (dosages are exact in it), training lines with their out-of-fold predictions.
     projected = projector.project_lines(dosage, line_names)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(line_names)}
-    snp_dtype = torch.int8 if windows else torch.float32
+    snp_dtype = torch.float16 if hybrid else torch.int8 if windows else torch.float32
 
     # Image data and metadata
     image_dir = resolve_input(cfg.image_dir, 'scaled WiDiv image directory')
@@ -709,7 +764,13 @@ def main(overrides=None):
         ProjectedWidivDataset(train_eval_samples, make_transforms(False)),
         batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=pin)
 
-    if windows:
+    if hybrid:
+        encoder_config = HybridDosageEncoder.for_layout(
+            projector, window_dim=cfg.window_dim, embedding_dim=preset['snp_embed_dim'],
+            num_tokens=cfg.num_tokens, hidden_dim=preset['encoder_hidden_dim'],
+            summary_tokens=cfg.hybrid_summary_tokens,
+            window_token_dropout=cfg.hybrid_window_dropout).config()
+    elif windows:
         encoder_config = GatedDosageWindowEncoder.for_layout(
             projector, window_dim=cfg.window_dim, embedding_dim=preset['snp_embed_dim'],
             num_tokens=cfg.num_tokens, hidden_dim=preset['encoder_hidden_dim']).config()
@@ -737,7 +798,8 @@ def main(overrides=None):
                 f"  checkpoint: {saved_unet}\n  preset:     {unet_config}\n"
                 "Restore the preset, or move that folder's checkpoints aside to start over.")
 
-    snp_encoder = (GatedDosageWindowEncoder if windows else DosagePCAEncoder)(**encoder_config)
+    snp_encoder = (HybridDosageEncoder if hybrid else GatedDosageWindowEncoder if windows
+                   else DosagePCAEncoder)(**encoder_config)
     unet = DenoisingUNet(**unet_config).to(device)
     if resume_ckpt is not None:
         snp_encoder.load_state_dict(resume_ckpt['snp_encoder_state_dict'])
@@ -1122,6 +1184,8 @@ def main(overrides=None):
                 'encoding': encoding_name,
                 # (window size, PCs, features per window, sparsity, warm-up, ramp).
                 'window_settings': window_settings if windows else None,
+                # (summary PCs, window-token dropout, summary tokens), hybrid only.
+                'hybrid_settings': hybrid_settings,
                 'qtl_removal': qtl_removal,
                 'latent_target': cfg.latent_target,
                 # Generation must decode with these: widiv_latents.ScaledDecoder
@@ -1176,6 +1240,7 @@ def main(overrides=None):
             'snp_encoder_parameters': n_encoder,
             'encoding': encoding_name,
             'window_settings': window_settings if windows else None,
+            'hybrid_settings': hybrid_settings,
             'qtl_removal': qtl_removal,
             'latent_target': cfg.latent_target,
             'latent_scaling': cfg.latent_scaling,

@@ -8,6 +8,12 @@
 #                train_widiv.py DATASET_DEFAULTS says why 95% rather than WiDiv's 80%
 #   1  windows   option F: 32 PCs plus gated windows of 200 markers (50 windows),
 #                sparsity 1e-6 per open window
+#   2  hybrid    the windows tokens plus tokens from an out-of-fold genomic
+#                prediction of each line's image (256 summary PCs), window
+#                tokens dropped for half the training samples
+#                (widiv_hybrid_encoding.py). Not in the default array: run it
+#                with --array=2. Its folder is
+#                ..._windows200_pc32_sp1e-06_hybrid256_drop0.5_vaev3/.
 #
 # Both train on split_random only (the RIL has no other split), with the same
 # 198 validation lines held out of the 1,979 training lines; the 495 test lines
@@ -26,6 +32,7 @@
 #     mkdir -p results/training/slurm
 #     sbatch code/widiv/train_ril_hellbender.sbatch             # both encodings
 #     sbatch --array=0 code/widiv/train_ril_hellbender.sbatch   # PCA only
+#     sbatch --array=2 code/widiv/train_ril_hellbender.sbatch   # hybrid
 #
 # Folders: models/diffusion_ril_v5_medium_random_vaev3/ and
 # models/diffusion_ril_v5_medium_random_windows200_pc32_sp1e-06_vaev3/. A
@@ -47,9 +54,9 @@ set -euo pipefail
 export WIDIV_DATASET=ril_v5
 export WIDIV_SPLIT=random
 export DIFFUSION_SIZE=${DIFFUSION_SIZE:-medium}
-ENCODINGS=(pca windows)
+ENCODINGS=(pca windows hybrid)
 export WIDIV_SNP_ENCODING=${ENCODINGS[${SLURM_ARRAY_TASK_ID:-0}]}
-if [ "$WIDIV_SNP_ENCODING" = windows ]; then
+if [ "$WIDIV_SNP_ENCODING" != pca ]; then
   export WIDIV_WINDOW_SIZE=200
   export WIDIV_WINDOW_PCS=32
   export WIDIV_WINDOW_SPARSITY=${WIDIV_WINDOW_SPARSITY:-1e-6}

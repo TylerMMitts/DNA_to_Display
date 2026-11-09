@@ -228,13 +228,18 @@ class GatedDosageWindowEncoder(nn.Module):
                 'hidden_dim': self.hidden_dim, 'dropout': self.dropout, 'init_open': self.init_open}
 
 
-# Either encoding from a WiDiv diffusion checkpoint, in eval mode, with the
+# Any of the encodings (PCA, windows, hybrid) from a WiDiv diffusion checkpoint, in eval mode, with the
 # projector that turns a dosage matrix into the encoder's input:
 #     encoder, projector = load_widiv_encoder(ckpt)
 #     tokens = encoder(torch.tensor(projector.transform(dosage), dtype=torch.float32))
 def load_widiv_encoder(ckpt, device='cpu'):
     state = ckpt['snp_projector']
-    if state.get('kind') == DosageWindowLayout.kind:
+    if state.get('kind') == 'widiv_dosage_hybrid':
+        # Imported here: widiv_hybrid_encoding builds on this module.
+        from widiv_hybrid_encoding import HybridDosageEncoder, HybridLayout
+        projector = HybridLayout.from_state_dict(state)
+        encoder = HybridDosageEncoder(**ckpt['snp_encoder_config'])
+    elif state.get('kind') == DosageWindowLayout.kind:
         projector = DosageWindowLayout.from_state_dict(state)
         encoder = GatedDosageWindowEncoder(**ckpt['snp_encoder_config'])
     else:

@@ -81,6 +81,10 @@ class DosageWindowLayout:
     def transform(self, dosage):
         return np.atleast_2d(np.asarray(dosage)).astype(np.int8)
 
+    # Same call as DosagePCAProjector.project_lines; every line is treated alike here.
+    def project_lines(self, dosage, line_names):
+        return self.transform(dosage)
+
     @property
     def output_dim(self):
         return self.n_snps

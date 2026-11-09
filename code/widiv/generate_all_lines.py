@@ -151,8 +151,10 @@ def main():
 
     def make(jobs):
         # (genotype, seed) pairs -> rows of measured traits, images saved to images/.
-        snp = torch.tensor(projector.transform(dosage[[row_of[g] for g, _ in jobs]]), dtype=torch.float32,
-                           device=device)
+        # project_lines: a matched-scores model sees its training lines as it did in training.
+        names = [g for g, _ in jobs]
+        snp = torch.tensor(projector.project_lines(dosage[[row_of[g] for g in names]], names),
+                           dtype=torch.float32, device=device)
         with torch.no_grad():
             images = generate_widiv_batch(encoder, unet, scheduler, decoder, snp, [s for _, s in jobs], device,
                                           (unet_config['latent_channels'], 64, 64), args.steps,

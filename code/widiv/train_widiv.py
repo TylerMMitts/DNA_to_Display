@@ -354,9 +354,18 @@ def main(overrides=None):
         # split_random and 340 for split_cluster: on this data ridge regression
         # on about 400 PCs matched GBLUP and 168 fell short
         # (results/widiv/genetics_profile/). The RIL uses 0.95 (DATASET_DEFAULTS
-        # says why). pca_n_components fixes the number instead.
-        pca_target_variance = DATASET_DEFAULTS['pca_variance']
+        # says why). pca_n_components fixes the number instead. WIDIV_PCA_VARIANCE
+        # overrides it; 1.0 keeps every component the fitting lines support (732
+        # on split_random), which on test lines decodes SNPs as well as any linear
+        # encoding fitted on these lines can and predicts traits about as well as
+        # GBLUP (results/widiv/snp_encoding_analysis/).
+        pca_target_variance = float(os.environ.get('WIDIV_PCA_VARIANCE', DATASET_DEFAULTS['pca_variance']))
         pca_n_components = None
+        # Shrink the training lines' PC scores to the spread unseen lines have
+        # (widiv_snp_encoding.heldout_score_scale), so validation and test lines
+        # are not pulled towards the centre of what the model trained on.
+        # WIDIV_PCA_MATCH_HELDOUT=1 turns it on.
+        pca_match_heldout = os.environ.get('WIDIV_PCA_MATCH_HELDOUT', '0') == '1'
 
         # Leave the designed QTL out of the genotype, to see how much the model leans
         # on them. exclude_qtl_kb: the PCA never sees the 40 QTL SNPs (0), or those plus
@@ -494,6 +503,9 @@ def main(overrides=None):
     windows = cfg.snp_encoding == 'windows'
     if windows and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
         raise SystemExit("leaving the QTL out is only implemented for snp_encoding='pca'")
+    if cfg.pca_match_heldout and (windows or cfg.orthogonalize_qtl):
+        raise SystemExit("pca_match_heldout is only implemented for snp_encoding='pca' "
+                         "without orthogonalize_qtl")
     if (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl) and cfg.qtl_path is None:
         raise SystemExit(f"{WIDIV_DATASET} has no QTL table (the sender holds it back), "
                          "so the QTL cannot be left out")
@@ -510,6 +522,10 @@ def main(overrides=None):
                                 + ('_layout' if cfg.layout_channel else '')
                                 + (f'_windows{cfg.window_size}_pc{cfg.window_pcs}'
                                    f'_sp{cfg.window_sparsity:.0e}' if windows else '')
+                                + (f'_pca{round(cfg.pca_target_variance * 100)}'
+                                   if not windows and cfg.pca_n_components is None
+                                   and cfg.pca_target_variance != DATASET_DEFAULTS['pca_variance'] else '')
+                                + ('_matched' if cfg.pca_match_heldout else '')
                                 + (f'_noqtl{cfg.exclude_qtl_kb}kb' if cfg.exclude_qtl_kb is not None else '')
                                 + ('_orth' if cfg.orthogonalize_qtl else '')
                                 + litevae_tag(cfg.litevae_checkpoint))
@@ -563,6 +579,11 @@ def main(overrides=None):
         if saved_removal != qtl_removal:
             raise SystemExit(f"{resume_path.name} was trained with QTL removal {saved_removal}, not "
                              f"{qtl_removal}. Give this run its own run_name.")
+        saved_proj = resume_ckpt['snp_projector']
+        if not windows and bool(saved_proj.get('match_heldout', False)) != cfg.pca_match_heldout:
+            raise SystemExit(f"{resume_path.name} was trained with pca_match_heldout="
+                             f"{bool(saved_proj.get('match_heldout', False))}, not "
+                             f"{cfg.pca_match_heldout}. Give this run its own run_name.")
         if windows and tuple(resume_ckpt.get('window_settings', ())) != window_settings:
             raise SystemExit(f"{resume_path.name} was trained with window size, PCs, features, "
                              f"sparsity, warm-up and ramp {tuple(resume_ckpt.get('window_settings', ()))}, "
@@ -619,13 +640,16 @@ def main(overrides=None):
                 print(f"  leaving QTL out: {0 if exclude is None else len(exclude):,} SNPs removed, "
                       f"{0 if orthogonalize is None else len(orthogonalize)} QTL orthogonalized")
             projector = DosagePCAProjector(n_components=cfg.pca_n_components,
-                                           target_variance=cfg.pca_target_variance)
+                                           target_variance=cfg.pca_target_variance,
+                                           match_heldout=cfg.pca_match_heldout)
             projector.fit(dosage[fit_rows], snp_names, exclude_columns=exclude,
-                          orthogonalize_columns=orthogonalize)
+                          orthogonalize_columns=orthogonalize,
+                          line_names=[g for g in sorted(train_lines) if g in row_of])
 
     # The encoder's input per line: PCA scores, or (windows) the dosage row itself,
-    # kept as int8 - 90,790 values per line - and cast inside the encoder.
-    projected = projector.transform(dosage)
+    # kept as int8 - 90,790 values per line - and cast inside the encoder. With
+    # pca_match_heldout the training lines' scores are shrunk (project_lines).
+    projected = projector.project_lines(dosage, line_names)
     projected_by_genotype = {name: projected[i] for i, name in enumerate(line_names)}
     snp_dtype = torch.int8 if windows else torch.float32
 

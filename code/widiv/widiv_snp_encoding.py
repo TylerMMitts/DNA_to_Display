@@ -74,19 +74,60 @@ def qtl_columns(snp_names, qtl_path, snp_map_path, flank_kb=0):
     return np.flatnonzero(removed), qtl_cols
 
 
+# Held-out score shrinkage, per component, from the fitting lines alone.
+#
+# A line the PCA was fitted on scores far further out on the smaller components
+# than a line it was not: on WiDiv, test lines have 16% of the fitting lines'
+# score variance on PCs 151-369 and 30% on PCs 51-150, so a test line's score
+# vector is about two-thirds as long. A model trained on fitting-line scores
+# therefore meets test genotypes pulled towards the centre, which is part of why
+# held-out generated traits vary too little (results/widiv/snp_encoding_analysis/).
+# This estimates the ratio by refitting on 9/10 of the fitting lines and scoring
+# the tenth, and returns sqrt(ratio) per component (capped at 1, smoothed over
+# neighbouring components): multiplying the fitting lines' scores by it gives them
+# the spread an unseen line has. Estimated without any test or validation line;
+# it matched the test lines' actual ratio within 0.05 from PC 11 on.
+def heldout_score_scale(gram, n_components, folds=10, seed=0, smooth=15):
+    gram = np.asarray(gram, dtype=np.float64)
+    n = len(gram)
+    parts = np.array_split(np.random.default_rng(seed).permutation(n), folds)
+    ratios = []
+    for part in parts:
+        inside = np.setdiff1d(np.arange(n), part)
+        lam, u = np.linalg.eigh(gram[np.ix_(inside, inside)])
+        order = np.argsort(lam)[::-1]
+        lam, u = np.clip(lam[order], 1e-12, None), u[:, order]
+        m = min(n_components, len(inside) - 1)
+        held = gram[np.ix_(part, inside)] @ u[:, :m] / np.sqrt(lam[:m])
+        own = u[:, :m] * np.sqrt(lam[:m])
+        ratios.append(held.var(0) / np.maximum(own.var(0), 1e-12))
+    m = min(len(r) for r in ratios)
+    ratio = np.median(np.stack([r[:m] for r in ratios]), axis=0)
+    half = smooth // 2
+    ratio = np.array([np.median(ratio[max(0, i - half):i + half + 1]) for i in range(m)])
+    ratio = np.concatenate([ratio, np.full(n_components - m, ratio[-1])])
+    return np.sqrt(np.clip(ratio, 0, 1)).astype(np.float32)
+
+
 class DosagePCAProjector:
 
-    def __init__(self, n_components=None, target_variance=0.80):
+    def __init__(self, n_components=None, target_variance=0.80, match_heldout=False):
         # n_components fixes the size; otherwise the smallest number reaching
-        # target_variance of the training lines' total variance.
+        # target_variance of the training lines' total variance (1.0: every
+        # component the fitting lines support, one fewer than their number).
+        # match_heldout: shrink the fitting lines' own scores to the spread unseen
+        # lines have (heldout_score_scale); see project_lines.
         self.n_components = n_components
         self.target_variance = target_variance
+        self.match_heldout = bool(match_heldout)
         self.mean_ = None
         self.scale_ = None
         self.components_ = None
         self.explained_variance_ratio_ = None
         self.explained_variance_ = None
         self.snp_names = None
+        self.fit_scale_ = None
+        self.fitted_lines_ = None
 
     # Standardises dosages: missing (-1) becomes the training mean, so 0 after centring.
     def _standardize(self, dosage):
@@ -101,8 +142,14 @@ class DosagePCAProjector:
     # 0, so every later genotype matrix keeps its full width and changing one of these
     # SNPs changes nothing. orthogonalize_columns: SNPs whose linear signal is also
     # subtracted from the scores, by regression on the fitting lines; see transform.
+    # line_names: the fitting lines, in the row order of dosage; needed with
+    # match_heldout, so project_lines knows whose scores to shrink.
     def fit(self, dosage, snp_names=None, verbose=True, exclude_columns=None,
-            orthogonalize_columns=None):
+            orthogonalize_columns=None, line_names=None):
+        if self.match_heldout and line_names is None:
+            raise ValueError("match_heldout needs the fitting lines' names (line_names)")
+        if self.match_heldout and orthogonalize_columns is not None:
+            raise ValueError("match_heldout is not implemented together with orthogonalize_columns")
         x = np.asarray(dosage, dtype=np.float32)
         n, p = x.shape
         observed = x >= 0
@@ -145,10 +192,30 @@ class DosagePCAProjector:
         del z
         self.explained_variance_ratio_ = ratio[:k]
         self.explained_variance_ = lam[:k] / max(n - 1, 1)
+        self.fit_scale_, self.fitted_lines_ = None, None
+        if self.match_heldout:
+            self.fit_scale_ = heldout_score_scale(gram, k)
+            self.fitted_lines_ = [str(g) for g in line_names]
         if verbose:
             print(f"  dosage PCA on {n} training lines x {p:,} SNPs: {k} components, "
                   f"{ratio[:k].sum():.1%} of variance")
+            if self.match_heldout:
+                print(f"  fitting lines' scores shrunk to held-out spread: factor "
+                      f"{self.fit_scale_[:10].mean():.2f} on PCs 1-10, {self.fit_scale_[-50:].mean():.2f} on the last 50")
         return self
+
+    # Scores for named lines. With match_heldout, the lines the PCA was fitted on
+    # get their scores shrunk to the spread an unseen line has; every other line
+    # (validation, test, edited genotypes) gets the plain projection. A model
+    # trained this way must be conditioned through this method, not transform,
+    # so its training lines look the way they did in training.
+    def project_lines(self, dosage, line_names):
+        scores = self.transform(dosage)
+        if getattr(self, 'fit_scale_', None) is not None:
+            fitted = set(self.fitted_lines_)
+            rows = [i for i, g in enumerate(line_names) if str(g) in fitted]
+            scores[rows] *= self.fit_scale_
+        return scores
 
     def transform(self, dosage, chunk_size=128):
         if self.components_ is None:
@@ -188,12 +255,19 @@ class DosagePCAProjector:
             'excluded_columns': getattr(self, 'excluded_columns_', None),
             'orthogonalize_columns': getattr(self, 'orthogonalize_columns_', None),
             'orthogonalize_weights': getattr(self, 'orthogonalize_weights_', None),
+            'match_heldout': self.match_heldout,
+            'fit_scale': self.fit_scale_,
+            'fitted_lines': self.fitted_lines_,
         }
 
     @classmethod
     def from_state_dict(cls, state):
         obj = cls(n_components=state.get('n_components'),
-                  target_variance=state.get('target_variance', 0.80))
+                  target_variance=state.get('target_variance', 0.80),
+                  match_heldout=state.get('match_heldout', False))
+        obj.fit_scale_ = (np.asarray(state['fit_scale'], dtype=np.float32)
+                          if state.get('fit_scale') is not None else None)
+        obj.fitted_lines_ = state.get('fitted_lines')
         obj.mean_ = np.asarray(state['mean'], dtype=np.float32)
         obj.scale_ = np.asarray(state['scale'], dtype=np.float32)
         obj.components_ = np.asarray(state['components'], dtype=np.float32)

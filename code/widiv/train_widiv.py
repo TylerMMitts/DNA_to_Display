@@ -472,6 +472,13 @@ def main(overrides=None):
         beta_end = 0.02
         learning_rate = 1e-4
         snp_encoder_learning_rate = 1e-4
+        # Warm restart: the cosine schedule ends at 1e-7, so resuming a finished
+        # run with more epochs would carry on at 1e-7 and learn almost nothing.
+        # WIDIV_RESTART_LR sets the learning rate the resumed run starts from
+        # (the SNP encoder and window gates scaled by the same factor), and a new
+        # cosine schedule falls from there to the new num_epochs.
+        restart_learning_rate = (float(os.environ['WIDIV_RESTART_LR'])
+                                 if os.environ.get('WIDIV_RESTART_LR') else None)
         # About 180 optimiser steps per epoch at this batch size, against about
         # 23 for seeds, so 400 epochs is about three times the seed run in steps.
         # The v3 random and cluster models ran 500, which also sets the cosine learning
@@ -900,12 +907,19 @@ def main(overrides=None):
                    {'params': [ldm.snp_encoder.log_alpha], 'lr': cfg.window_gate_learning_rate}]
     else:
         groups += [{'params': ldm.snp_encoder.parameters(), 'lr': cfg.snp_encoder_learning_rate}]
+    base_lrs = [g['lr'] for g in groups]
     optimizer = optim.Adam(groups)
     if resume_ckpt is not None:
         optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
-        for group in optimizer.param_groups:
+        for group, base in zip(optimizer.param_groups, base_lrs):
+            if cfg.restart_learning_rate is not None:
+                group['lr'] = base * cfg.restart_learning_rate / cfg.learning_rate
             group['initial_lr'] = group['lr']
-        print("Restored optimizer state")
+        print("Restored optimizer state"
+              + (f"; warm restart at lr {cfg.restart_learning_rate:.1e}"
+                 if cfg.restart_learning_rate is not None else ""))
+    elif cfg.restart_learning_rate is not None:
+        raise SystemExit("WIDIV_RESTART_LR only applies when resuming; no checkpoint found for this run")
 
     # T_max is the epochs remaining, so the cosine schedule continues smoothly
     # from the resumed epoch.

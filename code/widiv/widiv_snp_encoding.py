@@ -292,6 +292,62 @@ class DosagePCAEncoder(OneHotSNPEncoder):
     pass
 
 
+# The 'QTL only' encoding: the encoder sees nothing but the standardised
+# dosages at the given QTL SNPs (no PCs, no other SNP), through the same MLP as
+# the PCA encoding (DosagePCAEncoder with input_dim = number of QTL). The
+# counterpart of orthogonalising the QTL out: how much of the genetic signal in
+# generated roots those loci alone carry. Standardised on the training lines.
+class QTLOnlyProjector:
+
+    kind = 'widiv_dosage_qtl_only'
+
+    def __init__(self):
+        self.columns = self.mean_ = self.scale_ = self.snp_names = None
+
+    def fit(self, dosage, snp_names, qtl_cols, verbose=True):
+        self.snp_names = list(snp_names)
+        self.columns = np.asarray(qtl_cols, dtype=np.int64)
+        x = np.asarray(dosage, dtype=np.float32)[:, self.columns]
+        observed = x >= 0
+        counts = np.maximum(observed.sum(0), 1)
+        self.mean_ = (np.where(observed, x, 0).sum(0) / counts).astype(np.float32)
+        sd = np.sqrt((np.where(observed, x - self.mean_, 0) ** 2).sum(0) / np.maximum(counts - 1, 1))
+        sd[sd == 0] = 1.0
+        self.scale_ = sd.astype(np.float32)
+        if verbose:
+            print(f"  QTL only: the encoder sees the dosages of {len(self.columns)} QTL SNPs and nothing else")
+        return self
+
+    def transform(self, dosage):
+        x = np.atleast_2d(np.asarray(dosage))[:, self.columns].astype(np.float32)
+        z = (x - self.mean_) / self.scale_
+        z[x < 0] = 0.0
+        return z
+
+    def project_lines(self, dosage, line_names):
+        return self.transform(dosage)
+
+    @property
+    def output_dim(self):
+        return len(self.columns)
+
+    def check_columns(self, snp_names):
+        if list(snp_names) != self.snp_names:
+            raise SystemExit("this genotype matrix's SNP columns differ from the ones the "
+                             "QTL-only projector was fitted on - refusing to encode it")
+
+    def state_dict(self):
+        return {'kind': self.kind, 'columns': self.columns, 'mean': self.mean_, 'scale': self.scale_,
+                'snp_names': self.snp_names}
+
+    @classmethod
+    def from_state_dict(cls, state):
+        obj = cls()
+        obj.columns, obj.mean_, obj.scale_ = state['columns'], state['mean'], state['scale']
+        obj.snp_names = list(state['snp_names'])
+        return obj
+
+
 def load_encoder_and_projector(checkpoint, device='cpu'):
     projector = DosagePCAProjector.from_state_dict(checkpoint['snp_projector'])
     encoder = DosagePCAEncoder(**checkpoint['snp_encoder_config'])

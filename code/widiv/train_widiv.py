@@ -73,7 +73,8 @@ from widiv_paths import (
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
-from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, load_widiv_genotypes, qtl_columns
+from widiv_snp_encoding import (DosagePCAEncoder, DosagePCAProjector, QTLOnlyProjector, load_widiv_genotypes,
+                                qtl_columns)
 from widiv_window_encoding import DosageWindowLayout, GatedDosageWindowEncoder
 from widiv_hybrid_encoding import HybridDosageEncoder, HybridLayout, tissue_layout_summary
 
@@ -378,8 +379,16 @@ def main(overrides=None):
         # (DosagePCAProjector.transform). Without it the test is weak: relatives share
         # the QTL, so the remaining PCs still predict them nearly as well (R^2 0.37 vs
         # 0.375 with the 40 SNPs gone; results/widiv/genetics_profile/qtl_removal_check.csv).
-        # WIDIV_EXCLUDE_QTL_KB and WIDIV_ORTHOGONALIZE_QTL=1 override them.
-        qtl_path = WIDIV_QTL
+        # WIDIV_EXCLUDE_QTL_KB and WIDIV_ORTHOGONALIZE_QTL=1 override them. For
+        # 'windows' and 'hybrid' only orthogonalize_qtl applies: every standardised
+        # SNP has the QTL genotypes regressed out (DosageWindowLayout), which on the
+        # RIL takes a designed QTL from R^2 0.98 readable to 0.00, where deleting even
+        # +/-10 cM around each leaves 0.54 (results/ril_v5/checkpoint_selection/
+        # qtl_leak_by_radius.csv).
+        # The QTL table: any CSV with a 'snp' column. The RIL's is held back from
+        # the default paths; point WIDIV_QTL_TABLE at one to run these tests, e.g.
+        # dataset/ril_v5/genetic/answer_key_ril_v5/designed_qtl_markers.csv.
+        qtl_path = Path(os.environ['WIDIV_QTL_TABLE']) if os.environ.get('WIDIV_QTL_TABLE') else WIDIV_QTL
         exclude_qtl_kb = (int(os.environ['WIDIV_EXCLUDE_QTL_KB'])
                           if os.environ.get('WIDIV_EXCLUDE_QTL_KB') else None)
         orthogonalize_qtl = os.environ.get('WIDIV_ORTHOGONALIZE_QTL', '0') == '1'
@@ -391,6 +400,9 @@ def main(overrides=None):
         #               gate a sparsity penalty pushes shut (widiv_window_encoding.py).
         #               The PCA keeps too little of any one SNP for designed
         #               genes to move their trait (about 0.4% of designed size).
+        #   'qtl_only' - the dosages of the QTL in qtl_path and nothing else, through
+        #               the PCA encoding's MLP (QTLOnlyProjector): how much the QTL
+        #               alone carry.
         #   'hybrid'  - out-of-fold genomic prediction of each line's image
         #               (a tissue-layout summary) as its own tokens, plus the
         #               'windows' tokens, dropped for a share of training samples
@@ -521,22 +533,29 @@ def main(overrides=None):
         raise SystemExit(f"latent_target must be 'mean' or 'sample', not {cfg.latent_target!r}")
     if cfg.latent_scaling not in ('channel', 'none'):
         raise SystemExit(f"latent_scaling must be 'channel' or 'none', not {cfg.latent_scaling!r}")
-    if cfg.snp_encoding not in ('pca', 'windows', 'hybrid'):
-        raise SystemExit(f"snp_encoding must be 'pca', 'windows' or 'hybrid', not {cfg.snp_encoding!r}")
+    if cfg.snp_encoding not in ('pca', 'windows', 'hybrid', 'qtl_only'):
+        raise SystemExit(f"snp_encoding must be 'pca', 'windows', 'hybrid' or 'qtl_only', "
+                         f"not {cfg.snp_encoding!r}")
     # The hybrid contains the windows encoder, so everything about gates applies to it too.
     hybrid = cfg.snp_encoding == 'hybrid'
     windows = cfg.snp_encoding in ('windows', 'hybrid')
-    if windows and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
-        raise SystemExit("leaving the QTL out is only implemented for snp_encoding='pca'")
+    qtl_only = cfg.snp_encoding == 'qtl_only'
+    if windows and cfg.exclude_qtl_kb is not None:
+        raise SystemExit("exclude_qtl_kb is only implemented for snp_encoding='pca'; use "
+                         "orthogonalize_qtl (WIDIV_ORTHOGONALIZE_QTL=1) for windows and hybrid")
+    if qtl_only and (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl):
+        raise SystemExit("qtl_only keeps only the QTL; it cannot also leave them out")
+    if qtl_only and cfg.qtl_path is None:
+        raise SystemExit(f"{WIDIV_DATASET} has no default QTL table; set WIDIV_QTL_TABLE")
     if cfg.pca_match_heldout and (windows or cfg.orthogonalize_qtl):
         raise SystemExit("pca_match_heldout is only implemented for snp_encoding='pca' "
                          "without orthogonalize_qtl")
     if (cfg.exclude_qtl_kb is not None or cfg.orthogonalize_qtl) and cfg.qtl_path is None:
-        raise SystemExit(f"{WIDIV_DATASET} has no QTL table (the sender holds it back), "
-                         "so the QTL cannot be left out")
+        raise SystemExit(f"{WIDIV_DATASET} has no default QTL table (the sender holds it back); "
+                         "set WIDIV_QTL_TABLE to leave QTL out")
     qtl_removal = {'exclude_qtl_kb': cfg.exclude_qtl_kb, 'orthogonalize_qtl': cfg.orthogonalize_qtl}
     encoding_name = ('widiv_dosage_hybrid' if hybrid else 'widiv_dosage_windows' if windows
-                     else 'widiv_dosage_pca')
+                     else 'widiv_dosage_qtl_only' if qtl_only else 'widiv_dosage_pca')
     window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
                        cfg.window_warmup_epochs, cfg.window_ramp_epochs)
     hybrid_settings = ((cfg.hybrid_summary_pcs, cfg.hybrid_window_dropout, cfg.hybrid_summary_tokens)
@@ -552,8 +571,9 @@ def main(overrides=None):
                                    f'_sp{cfg.window_sparsity:.0e}' if windows else '')
                                 + (f'_hybrid{cfg.hybrid_summary_pcs}_drop{cfg.hybrid_window_dropout:g}'
                                    if hybrid else '')
+                                + ('_qtlonly' if qtl_only else '')
                                 + (f'_pca{round(cfg.pca_target_variance * 100)}'
-                                   if not windows and cfg.pca_n_components is None
+                                   if not windows and not qtl_only and cfg.pca_n_components is None
                                    and cfg.pca_target_variance != DATASET_DEFAULTS['pca_variance'] else '')
                                 + ('_matched' if cfg.pca_match_heldout else '')
                                 + (f'_noqtl{cfg.exclude_qtl_kb}kb' if cfg.exclude_qtl_kb is not None else '')
@@ -646,7 +666,8 @@ def main(overrides=None):
           f"({time.time() - t0:.1f}s)")
     row_of = {n: i for i, n in enumerate(line_names)}
 
-    projector_class = HybridLayout if hybrid else DosageWindowLayout if windows else DosagePCAProjector
+    projector_class = (HybridLayout if hybrid else DosageWindowLayout if windows
+                       else QTLOnlyProjector if qtl_only else DosagePCAProjector)
     if resume_ckpt is not None:
         # Reuses the exact basis already in use rather than refitting.
         projector = projector_class.from_state_dict(resume_ckpt['snp_projector'])
@@ -657,7 +678,14 @@ def main(overrides=None):
               + (f" + {projector.summary_pcs} predicted image-summary PCs" if hybrid else ""))
     else:
         fit_rows = [row_of[g] for g in sorted(train_lines) if g in row_of]
-        if hybrid:
+        # QTL columns for orthogonalize_qtl (windows, hybrid) and qtl_only.
+        qtl_cols = None
+        if cfg.orthogonalize_qtl or qtl_only:
+            _, qtl_cols = qtl_columns(snp_names, resolve_input(cfg.qtl_path, 'QTL table'),
+                                      resolve_input(cfg.snp_map_path, 'WiDiv SNP map'), 0)
+        if qtl_only:
+            projector = QTLOnlyProjector().fit(dosage[fit_rows], snp_names, qtl_cols)
+        elif hybrid:
             # Each training line's image summary (mean over its images), from the
             # images alone; validation and test images are never read here.
             snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
@@ -678,7 +706,7 @@ def main(overrides=None):
                   f"({time.time() - t1:.0f}s)")
             projector = HybridLayout(cfg.window_size, cfg.window_pcs, cfg.hybrid_summary_pcs).fit(
                 dosage, fit_rows, snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy(),
-                line_names, summaries)
+                line_names, summaries, orthogonalize_columns=qtl_cols if cfg.orthogonalize_qtl else None)
             print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "
                   f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp; "
                   f"window tokens dropped for {cfg.hybrid_window_dropout:.0%} of training samples")
@@ -686,7 +714,8 @@ def main(overrides=None):
             snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
             snp_map = snp_map.loc[snp_names]
             projector = DosageWindowLayout(cfg.window_size, cfg.window_pcs).fit(
-                dosage[fit_rows], snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy())
+                dosage[fit_rows], snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy(),
+                orthogonalize_columns=qtl_cols if cfg.orthogonalize_qtl else None)
             print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "
                   f"{cfg.window_warmup_epochs}-epoch warm-up and {cfg.window_ramp_epochs}-epoch ramp")
         else:
@@ -1250,8 +1279,8 @@ def main(overrides=None):
             'litevae': Path(cfg.litevae_checkpoint).name,
             'litevae_epoch': litevae_epoch,
             'projected_dim': int(projector.output_dim),
-            'pca_variance': float((projector.pca if windows else projector)
-                                  .explained_variance_ratio_.sum()),
+            'pca_variance': (None if qtl_only else float((projector.pca if windows else projector)
+                                                         .explained_variance_ratio_.sum())),
             'windows': projector.n_windows if windows else None,
             'train_lines': len({s['genotype'] for s in train_samples}),
             'val_lines': len(val_lines), 'test_lines': len(test_lines),

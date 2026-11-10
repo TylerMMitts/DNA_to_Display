@@ -107,13 +107,6 @@ def tissue_layout_summary(rgb):
                       starts, gap_length, spec_white.flatten(), spec_scl.flatten()]).cpu().numpy()
 
 
-def _standardize(dosage, mean, scale):
-    x = np.asarray(dosage, dtype=np.float32)
-    z = (x - mean) / scale
-    z[x < 0] = 0.0
-    return z
-
-
 def _loo_lambdas(K, Y, grid):
     # Ridge penalty per target column by leave-one-out error, on a centred kernel.
     ev, V = np.linalg.eigh(K)
@@ -178,10 +171,12 @@ class HybridLayout:
     # dosage: every line's dosage row; fit_rows: rows of the training lines;
     # chromosomes, positions: per SNP; summaries: {line: summary vector} for the
     # training lines that have images (averaged over a line's images).
+    # orthogonalize_columns: QTL columns to hide from both the windows and the
+    # genomic prediction (DosageWindowLayout.fit).
     def fit(self, dosage, fit_rows, snp_names, chromosomes, positions, line_names, summaries,
-            verbose=True):
-        self.layout.fit(dosage[fit_rows], snp_names, chromosomes, positions, verbose=verbose)
-        pca = self.layout.pca
+            verbose=True, orthogonalize_columns=None):
+        self.layout.fit(dosage[fit_rows], snp_names, chromosomes, positions, verbose=verbose,
+                        orthogonalize_columns=orthogonalize_columns)
         lines = [line_names[r] for r in fit_rows if line_names[r] in summaries]
         rows = [r for r in fit_rows if line_names[r] in summaries]
         S = np.stack([summaries[g] for g in lines]).astype(np.float64)
@@ -195,7 +190,7 @@ class HybridLayout:
         Y = Sz @ vt[:k].T
         variance = float((sv[:k] ** 2).sum() / (sv ** 2).sum())
 
-        Z = _standardize(dosage[rows], pca.mean_, pca.scale_)
+        Z = self.layout.standardized(dosage[rows])
         p = Z.shape[1]
         K = (Z.astype(np.float64) @ Z.T.astype(np.float64)) / p
         Kc, _ = _centre(K, K)
@@ -230,8 +225,7 @@ class HybridLayout:
         return self
 
     def predict_summary(self, dosage):
-        z = _standardize(np.atleast_2d(dosage), self.layout.pca.mean_, self.layout.pca.scale_)
-        return z @ self.weights + self.intercept
+        return self.layout.standardized(dosage) @ self.weights + self.intercept
 
     def _row(self, dosage, summary):
         s = (summary - self.pred_mean) / self.pred_scale

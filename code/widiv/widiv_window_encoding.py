@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 
 from latent_diffusion.models.window_encoding import BETA, GAMMA, ZETA
-from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector
+from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, QTLOnlyProjector
 
 
 class DosageWindowLayout:
@@ -50,11 +50,33 @@ class DosageWindowLayout:
         self.window_chromosome = None
         self.snp_names = None
         self.positions = None
+        # Optional QTL orthogonalisation: every standardised SNP minus what the
+        # QTL genotypes linearly predict of it (qtl_beta, fitted on the training
+        # lines), so neither the PCs nor the windows can read the QTL. The QTL
+        # columns themselves come out exactly 0.
+        self.qtl_columns = None
+        self.qtl_beta = None
 
     # chromosomes, positions: per SNP column of the dosage matrix (from the SNP map).
-    def fit(self, dosage, snp_names, chromosomes, positions, verbose=True):
+    # orthogonalize_columns: QTL columns to hide (see qtl_columns above).
+    def fit(self, dosage, snp_names, chromosomes, positions, verbose=True, orthogonalize_columns=None):
         self.snp_names = list(snp_names)
         self.pca = DosagePCAProjector(n_components=self.n_pcs).fit(dosage, snp_names, verbose=verbose)
+        if orthogonalize_columns is not None and len(orthogonalize_columns):
+            cols = np.asarray(orthogonalize_columns, dtype=np.int64)
+            z = self.pca._standardize(dosage)
+            self.qtl_columns = cols
+            self.qtl_beta = np.linalg.lstsq(z[:, cols].astype(np.float64), z.astype(np.float64),
+                                            rcond=None)[0].astype(np.float32)
+            zr = self.standardized(dosage)
+            # The PCs of what is left, so the PCs too say nothing linear about the QTL.
+            lam, u = np.linalg.eigh((zr @ zr.T).astype(np.float64))
+            order = np.argsort(lam)[::-1][:self.n_pcs]
+            s = np.sqrt(np.clip(lam[order], 1e-12, None))
+            self.pca.components_ = (u[:, order].T.astype(np.float32) @ zr) / s[:, None].astype(np.float32)
+            if verbose:
+                print(f"  {len(cols)} QTL orthogonalised out of every SNP (largest value left in a QTL "
+                      f"column: {float(np.abs(zr[:, cols]).max()):.1e})")
         chromosomes, positions = np.asarray(chromosomes), np.asarray(positions)
         self.positions = positions.tolist()
         order = np.lexsort((positions, chromosomes))
@@ -76,6 +98,13 @@ class DosageWindowLayout:
     @property
     def n_snps(self):
         return len(self.snp_names)
+
+    # Standardised dosages as the encoder computes them, QTL orthogonalised out if set.
+    def standardized(self, dosage):
+        z = self.pca._standardize(np.atleast_2d(dosage))
+        if self.qtl_columns is not None:
+            z = z - z[:, self.qtl_columns] @ self.qtl_beta
+        return z
 
     # The encoder's input: dosages as int8, columns checked by the caller.
     def transform(self, dosage):
@@ -120,7 +149,7 @@ class DosageWindowLayout:
         return {'kind': self.kind, 'window_size': self.window_size, 'n_pcs': self.n_pcs,
                 'pca': self.pca.state_dict(), 'windows': self.windows,
                 'window_chromosome': self.window_chromosome, 'snp_names': self.snp_names,
-                'positions': self.positions}
+                'positions': self.positions, 'qtl_columns': self.qtl_columns, 'qtl_beta': self.qtl_beta}
 
     @classmethod
     def from_state_dict(cls, state):
@@ -130,15 +159,26 @@ class DosageWindowLayout:
         obj.window_chromosome = list(state['window_chromosome'])
         obj.snp_names = list(state['snp_names'])
         obj.positions = list(state['positions'])
+        obj.qtl_columns, obj.qtl_beta = state.get('qtl_columns'), state.get('qtl_beta')
         return obj
+
+    @property
+    def n_qtl(self):
+        return 0 if self.qtl_columns is None else len(self.qtl_columns)
 
 
 class GatedDosageWindowEncoder(nn.Module):
     # Dosages (B, n_snps) -> tokens (B, num_tokens, embedding_dim).
 
+    # n_qtl > 0: the layout orthogonalises that many QTL out of the dosages
+    # (set_layout fills qtl_index and qtl_beta).
     def __init__(self, n_snps, n_pcs, n_windows, window_width, window_dim=4, embedding_dim=256,
-                 num_tokens=8, hidden_dim=512, dropout=0.1, init_open=0.9):
+                 num_tokens=8, hidden_dim=512, dropout=0.1, init_open=0.9, n_qtl=0):
         super().__init__()
+        self.n_qtl = int(n_qtl)
+        if self.n_qtl:
+            self.register_buffer('qtl_index', torch.zeros(self.n_qtl, dtype=torch.long))
+            self.register_buffer('qtl_beta', torch.zeros(self.n_qtl, int(n_snps)))
         self.n_snps, self.n_pcs, self.n_windows = int(n_snps), int(n_pcs), int(n_windows)
         self.window_width, self.window_dim = int(window_width), int(window_dim)
         self.embedding_dim, self.num_tokens, self.hidden_dim = embedding_dim, num_tokens, hidden_dim
@@ -173,6 +213,8 @@ class GatedDosageWindowEncoder(nn.Module):
     @classmethod
     def for_layout(cls, layout, **kwargs):
         index = layout.gather_index()
+        if getattr(layout, 'n_qtl', 0):
+            kwargs = {**kwargs, 'n_qtl': layout.n_qtl}
         return cls(layout.n_snps, layout.n_pcs, layout.n_windows, index.shape[1], **kwargs)
 
     def set_layout(self, layout):
@@ -182,6 +224,9 @@ class GatedDosageWindowEncoder(nn.Module):
             self.snp_scale.copy_(torch.as_tensor(pca.scale_))
             self.pca_components.copy_(torch.as_tensor(pca.components_))
             self.window_index.copy_(torch.as_tensor(layout.gather_index()))
+            if self.n_qtl:
+                self.qtl_index.copy_(torch.as_tensor(layout.qtl_columns))
+                self.qtl_beta.copy_(torch.as_tensor(layout.qtl_beta))
         return self
 
     # Sampled in training (one draw per batch); deterministic in eval, where a
@@ -207,7 +252,10 @@ class GatedDosageWindowEncoder(nn.Module):
     def standardize(self, dosage):
         x = dosage.float()
         z = (x - self.snp_mean) / self.snp_scale
-        return torch.where(x < 0, torch.zeros_like(z), z)
+        z = torch.where(x < 0, torch.zeros_like(z), z)
+        if self.n_qtl:
+            z = z - z[:, self.qtl_index] @ self.qtl_beta
+        return z
 
     # Each window's features before its gate, (B, n_windows, window_dim).
     def window_features(self, z):
@@ -225,7 +273,9 @@ class GatedDosageWindowEncoder(nn.Module):
         return {'n_snps': self.n_snps, 'n_pcs': self.n_pcs, 'n_windows': self.n_windows,
                 'window_width': self.window_width, 'window_dim': self.window_dim,
                 'embedding_dim': self.embedding_dim, 'num_tokens': self.num_tokens,
-                'hidden_dim': self.hidden_dim, 'dropout': self.dropout, 'init_open': self.init_open}
+                'hidden_dim': self.hidden_dim, 'dropout': self.dropout, 'init_open': self.init_open,
+                # Only when set, so configs of runs from before it still match on resume.
+                **({'n_qtl': self.n_qtl} if self.n_qtl else {})}
 
 
 # Any of the encodings (PCA, windows, hybrid) from a WiDiv diffusion checkpoint, in eval mode, with the
@@ -239,6 +289,9 @@ def load_widiv_encoder(ckpt, device='cpu'):
         from widiv_hybrid_encoding import HybridDosageEncoder, HybridLayout
         projector = HybridLayout.from_state_dict(state)
         encoder = HybridDosageEncoder(**ckpt['snp_encoder_config'])
+    elif state.get('kind') == QTLOnlyProjector.kind:
+        projector = QTLOnlyProjector.from_state_dict(state)
+        encoder = DosagePCAEncoder(**ckpt['snp_encoder_config'])
     elif state.get('kind') == DosageWindowLayout.kind:
         projector = DosageWindowLayout.from_state_dict(state)
         encoder = GatedDosageWindowEncoder(**ckpt['snp_encoder_config'])

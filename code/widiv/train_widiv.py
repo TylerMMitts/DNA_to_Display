@@ -70,6 +70,7 @@ from paths import (
 from widiv_paths import (
     WIDIV_DATASET, WIDIV_GENOTYPE_CACHE, WIDIV_GENOTYPES, WIDIV_IMAGE_SIZE, WIDIV_LATENT_CACHE_DIR,
     WIDIV_LITEVAE_MODEL, WIDIV_QTL, WIDIV_SCALED_DIR, WIDIV_SCALED_METADATA, WIDIV_SNP_MAP, WIDIV_SPLIT,
+    WIDIV_UPRIGHT,
 )
 from widiv_data import SPLITS, choose_val_lines, load_split, make_transforms
 from widiv_litevae import load_widiv_litevae
@@ -107,6 +108,12 @@ MODEL_NAME = f'diffusion_{WIDIV_DATASET}'
 DATASET_DEFAULTS = {
     'widiv':  {'epochs': 400, 'window_warmup': 100, 'window_ramp': 100, 'pca_variance': 0.80},
     'ril_v5': {'epochs': 800, 'window_warmup': 160, 'window_ramp': 160, 'pca_variance': 0.95},
+    # IMPC BCM: 8,835 mice, one X-ray each; about 6,750 train once the 15% test and
+    # 10% validation mice are set aside, 3.8 times the RIL's 1,780, so 210 epochs
+    # are about the RIL's 800 in optimiser steps. Train it with
+    # snp_encoding='qtl_only' (WIDIV_QTL lists every column); the window and PCA
+    # settings below are unused there.
+    'impc_bcm': {'epochs': 210, 'window_warmup': 40, 'window_ramp': 40, 'pca_variance': 0.95},
 }[WIDIV_DATASET]
 
 # Same presets as the root and seed trainers. WiDiv has about 3,000 training
@@ -976,7 +983,10 @@ def main(overrides=None):
         order = torch.randperm(len(train_samples))
         for start in range(0, len(order) - cfg.batch_size + 1, cfg.batch_size):
             idx = order[start:start + cfg.batch_size]
-            view = torch.randint(8, (len(idx),))
+            # dihedral_views order: views 0-3 unflipped quarter turns, 4-7 the same
+            # mirrored. Upright images (IMPC) use only 0 and 4: as is, or mirrored.
+            view = (4 * torch.randint(2, (len(idx),)) if WIDIV_UPRIGHT
+                    else torch.randint(8, (len(idx),)))
             rows = train_rows[idx]
             layout = layout_views[train_layout_rows[idx], view] if cfg.layout_channel else None
             yield (sample_latent(cache_mean[rows, view], cache_logvar[rows, view], layout),

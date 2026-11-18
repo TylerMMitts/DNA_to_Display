@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import (pick_device, TRAINING_RESULTS_DIR, best_checkpoint_path, checkpoint_path,
                    find_latest_checkpoint, resolve_input, resolve_output)
 from widiv_paths import (WIDIV_DATASET, WIDIV_IMAGE_SIZE, WIDIV_LITEVAE_DIR, WIDIV_SCALED_DIR,
-                         WIDIV_SCALED_METADATA, WIDIV_SPLIT)
+                         WIDIV_SCALED_METADATA, WIDIV_SPLIT, WIDIV_UPRIGHT)
 from widiv_data import SPLITS, load_split, make_transforms
 from widiv_litevae import LinearOutputLiteVAEDecoder, ScaleFreeLiteVAEEncoder
 
@@ -80,6 +80,12 @@ class WidivImageDataset(Dataset):
 # prepare_widiv_images.py centres every root, so a disc covers it, including the
 # white vessel lumens and aerenchyma gaps inside it that a "not white" test would miss.
 def foreground_mask(images, margin=3):
+    if WIDIV_UPRIGHT:
+        # IMPC X-rays (negatives on white): a mouse is long, with legs and tail out,
+        # so a disc would cover nearly everything. Use the non-white pixels
+        # themselves, grown by margin; the body has no white holes inside it.
+        tissue = (images.min(dim=1, keepdim=True).values < 0.96).float()
+        return F.max_pool2d(tissue, 2 * margin + 1, stride=1, padding=margin)
     B, _, H, W = images.shape
     ys = torch.arange(H, device=images.device, dtype=torch.float32) - (H - 1) / 2
     xs = torch.arange(W, device=images.device, dtype=torch.float32) - (W - 1) / 2
@@ -178,7 +184,9 @@ def main():
 
         # WiDiv: 250 epochs of about 285 steps. The RIL has about 1,780 training
         # images (one per line) against about 2,280, so 320 epochs keep the steps.
-        num_epochs = {'widiv': 250, 'ril_v5': 320}[WIDIV_DATASET]
+        # IMPC BCM: about 7,100 training X-rays (the 7,500 non-test mice less 5%
+        # validation), about 3.1 times WiDiv's, so 80 epochs keep about the steps.
+        num_epochs = {'widiv': 250, 'ril_v5': 320, 'impc_bcm': 80}[WIDIV_DATASET]
         # Half the seed autoencoder's 16: each image is four times the pixels.
         batch_size = 8
         learning_rate = 1e-4

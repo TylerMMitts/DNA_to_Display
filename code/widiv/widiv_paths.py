@@ -21,12 +21,23 @@ from paths import DATASET_DIR, MODELS_DIR, RESULTS_DIR  # noqa: E402
 #   'ril_v5' a biparental RIL population (2026-11-05), 2,500 lines x 10,000
 #            markers, one image per line, a random split only; its designed QTL
 #            and true genetic values are held back by the sender
+#   'impc_bcm' IMPC mouse whole-body dorso-ventral X-rays from the BCM centre
+#            (code/impc/), one image per mouse. A "line" is one mouse; its
+#            genotype row has one column per knocked-out gene (0 wild type,
+#            1 heterozygous, 2 homozygous or hemizygous) plus a sex column, so
+#            held-out mice share their genotype with training mice. Images are
+#            stored as negatives (white background) so the white-background
+#            logic of the root pipeline applies unchanged.
 # Every folder below is named after the dataset, so a RIL run never reads or
 # writes a WiDiv file.
 WIDIV_DATASET = os.environ.get('WIDIV_DATASET', 'widiv')
-if WIDIV_DATASET not in ('widiv', 'ril_v5'):
-    raise SystemExit(f"WIDIV_DATASET must be 'widiv' or 'ril_v5', not {WIDIV_DATASET!r}")
+if WIDIV_DATASET not in ('widiv', 'ril_v5', 'impc_bcm'):
+    raise SystemExit(f"WIDIV_DATASET must be 'widiv', 'ril_v5' or 'impc_bcm', not {WIDIV_DATASET!r}")
 RIL = WIDIV_DATASET == 'ril_v5'
+IMPC = WIDIV_DATASET.startswith('impc_')
+# Images with an up direction (a mouse lying head up) may only be mirrored left to
+# right in augmentation; root cross-sections have none and take every quarter turn.
+WIDIV_UPRIGHT = IMPC
 
 WIDIV_DIR = DATASET_DIR / WIDIV_DATASET
 
@@ -47,8 +58,17 @@ WIDIV_SNP_MAP = WIDIV_GENETIC_DIR / 'snp_map.csv'
 WIDIV_METADATA_DIR = WIDIV_DIR / 'metadata'
 WIDIV_SPLIT = WIDIV_METADATA_DIR / 'train_test_split.csv'
 # The delivered split columns. The RIL is one cross, so it has no cluster split.
-WIDIV_SPLITS = ('split_random',) if RIL else ('split_random', 'split_cluster')
-if RIL:
+WIDIV_SPLITS = ('split_random',) if (RIL or IMPC) else ('split_random', 'split_cluster')
+if IMPC:
+    # Written by code/impc/organize_impc.py. No genetic values exist; the IMPC's
+    # significant calls (answer_key/) and the X-ray measurements score the models.
+    WIDIV_GENETIC_VALUES = None
+    # Every genotype column, for snp_encoding='qtl_only': the encoder then reads the
+    # knockout and sex columns directly (a learned embedding per gene).
+    WIDIV_QTL = WIDIV_GENETIC_DIR / 'encoder_columns.csv'
+    WIDIV_PLOT_PHENOTYPES = WIDIV_METADATA_DIR / 'mouse_table.csv'
+    WIDIV_GENOTYPE_MEANS = WIDIV_PLOT_PHENOTYPES
+elif RIL:
     # Held back by the sender, who scores the generated roots against them.
     WIDIV_GENETIC_VALUES = None
     WIDIV_QTL = None

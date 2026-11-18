@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torchvision import transforms
 
-from widiv_paths import WIDIV_SPLITS
+from widiv_paths import WIDIV_SPLITS, WIDIV_UPRIGHT
 
 # The split columns this dataset was delivered with: both for WiDiv, only
 # split_random for the RIL (widiv_paths.py).
@@ -28,6 +28,10 @@ def make_transforms(augment):
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])]
     if not augment:
         return transforms.Compose(base)
+    # Upright images (IMPC mice, head up): a left-right mirror is a plausible
+    # mouse, a quarter turn is not.
+    if WIDIV_UPRIGHT:
+        return transforms.Compose(base + [transforms.RandomHorizontalFlip(p=0.5)])
     return transforms.Compose(base + [transforms.RandomHorizontalFlip(p=0.5),
                                       RandomQuarterTurn()])
 

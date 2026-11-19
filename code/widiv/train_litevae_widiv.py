@@ -27,6 +27,7 @@
 
 import json
 import sys
+from collections import deque
 from pathlib import Path
 
 import matplotlib
@@ -204,6 +205,18 @@ def main():
         # background_sigma. None restores the single N(0, 1) prior of v2.
         background_latent = -2.0
         background_sigma = 0.1
+        # Spike guard: a batch whose loss is more than spike_factor times the
+        # median of the last spike_window batches is not stepped on. The IMPC
+        # run without it blew up in epoch 14 - training error 0.0013 -> 0.33 in
+        # one epoch, then a constant gray output for good - after one outsized
+        # step; late in training Adam's per-weight scaling is tuned to tiny
+        # gradients, so a sudden large one moves every weight far, and clipping
+        # the gradient norm does not prevent that. Every loss still enters the
+        # window, so a lasting real rise (a new learning rate, say) lifts the
+        # median within a few hundred steps and stepping resumes.
+        spike_factor = 10.0
+        spike_window = 200
+        spike_min_history = 100
         val_split = 0.1
         num_workers = 8
         image_size = WIDIV_IMAGE_SIZE
@@ -344,11 +357,15 @@ def main():
             f">= num_epochs={cfg.num_epochs}. Raise num_epochs to continue.")
 
     best_path = best_checkpoint_path(save_dir, MODEL_NAME)
+    # Recent batch losses for the spike guard. Starts empty on a resume too, so
+    # the first spike_min_history steps after one are unguarded.
+    recent_losses = deque(maxlen=cfg.spike_window)
 
     for epoch in range(start_epoch, cfg.num_epochs + 1):
         encoder.train()
         decoder.train()
         totals = np.zeros(4)
+        applied, skipped, worst_skipped = 0, 0, 0.0
 
         progress = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.num_epochs}")
         for images in progress:
@@ -361,18 +378,38 @@ def main():
             recon = decoder(z, save_steps=False)
             loss, recon_loss, kl_loss, plain_mse = criterion(recon, images, z_mean, z_logvar)
 
+            loss_value = loss.item()
+            spike = (not np.isfinite(loss_value)
+                     or (len(recent_losses) >= cfg.spike_min_history
+                         and loss_value > cfg.spike_factor * float(np.median(recent_losses))))
+            if np.isfinite(loss_value):
+                recent_losses.append(loss_value)
             optimizer.zero_grad()
+            if spike:
+                # No backward pass, no step: the weights and Adam's state are
+                # left exactly as they were.
+                skipped += 1
+                worst_skipped = max(worst_skipped, loss_value) if np.isfinite(loss_value) else float('inf')
+                tqdm.write(f"  skipped step: loss {loss_value:.4g} vs recent median "
+                           f"{float(np.median(recent_losses)):.4g}")
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(encoder.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
             optimizer.step()
             step += 1
+            applied += 1
 
-            totals += [loss.item(), recon_loss.item(), kl_loss.item(), plain_mse.item()]
-            progress.set_postfix({'loss': f'{loss.item():.4f}',
+            totals += [loss_value, recon_loss.item(), kl_loss.item(), plain_mse.item()]
+            progress.set_postfix({'loss': f'{loss_value:.4f}',
                                   'recon': f'{recon_loss.item():.4f}'})
 
-        train_loss, train_recon, train_kl, train_mse = totals / max(len(train_loader), 1)
+        # Averages over the batches actually stepped on; skipped ones are counted
+        # separately so one outlier cannot make a healthy epoch look collapsed.
+        train_loss, train_recon, train_kl, train_mse = totals / max(applied, 1)
+        if skipped:
+            print(f"  spike guard skipped {skipped} of {applied + skipped} steps "
+                  f"(worst loss {worst_skipped:.4g})")
 
         encoder.eval()
         decoder.eval()
@@ -405,6 +442,7 @@ def main():
                         'train_plain_mse': train_mse,
                         'val_loss': val_loss, 'val_plain_mse': val_mse,
                         'all_white_mse': white_mse, **latent_stats,
+                        'skipped_steps': skipped, 'worst_skipped_loss': worst_skipped,
                         'lr': optimizer.param_groups[0]['lr']})
         print(f"  train {train_loss:.4f} (recon {train_recon:.4f}, kl {train_kl:.6f})"
               f"   val {val_loss:.4f}   val plain MSE {val_mse:.4f} (all white {white_mse:.4f})"

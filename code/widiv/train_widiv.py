@@ -761,6 +761,15 @@ def main(overrides=None):
     metadata = pd.read_csv(resolve_input(cfg.metadata_path, 'scaled WiDiv metadata '
                                          '(run prepare_widiv_images.py)'),
                            usecols=['scaled_filename', 'genotype'])
+    # Rows whose image is gone (removed as unusable, e.g. the four inverted IMPC
+    # X-rays) are dropped here, so the latent and layout caches below, which
+    # encode every listed image, never try to open them.
+    present = np.array([(Path(image_dir) / f).exists() for f in metadata.scaled_filename])
+    if not present.all():
+        print(f"{(~present).sum()} images listed in the metadata are missing from {image_dir} "
+              f"and are left out: {', '.join(metadata.scaled_filename[~present].head(10))}"
+              + (' ...' if (~present).sum() > 10 else ''))
+        metadata = metadata[present].reset_index(drop=True)
     train_samples, no_snp, no_file = build_samples(metadata, image_dir, projected_by_genotype,
                                                    train_lines)
     val_samples, v_no_snp, v_no_file = build_samples(metadata, image_dir, projected_by_genotype,

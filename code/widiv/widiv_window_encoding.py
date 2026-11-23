@@ -23,6 +23,17 @@
 #
 # Fitted on training lines only, like option A: the standardisation and the PCs
 # never see a test line.
+#
+# LD windows (ld_r2 set, WIDIV_WINDOW_LD_R2 in train_widiv.py): instead of fixed
+# runs of window_size SNPs, the windows are LD blocks found on the fitting lines'
+# own genotypes. Walking each chromosome in order, a block keeps taking the next
+# SNP while that SNP's r^2 with the block's first SNP is at least ld_r2, so every
+# SNP in a block is in LD >= ld_r2 with its anchor. Blocks then follow the
+# recombination landscape: long where recombination is rare (around centromeres,
+# where hundreds of SNPs carry one haplotype), short where it is frequent. On the
+# RIL v5 fitting lines, r^2 >= 0.5 gives 146 blocks of 5-495 SNPs (median 33)
+# instead of 50 windows of 200. The dataset ships no LD blocks; nothing but the
+# fitting lines' dosages is read to find them.
 
 import math
 
@@ -34,6 +45,30 @@ from latent_diffusion.models.window_encoding import BETA, GAMMA, ZETA
 from widiv_snp_encoding import DosagePCAEncoder, DosagePCAProjector, QTLOnlyProjector
 
 
+# LD blocks along one chromosome. z: (lines, SNPs) standardised dosages of the
+# fitting lines, SNPs in genome order. Returns a list of index arrays into z's
+# columns, contiguous and covering every SNP once. A block starts at an anchor SNP
+# and takes each next SNP while r^2(anchor, next) >= r2; the first SNP that falls
+# below starts the next block. Monomorphic SNPs (no variance on the fitting lines)
+# carry nothing and stay in the current block.
+def ld_blocks(z, r2):
+    z = np.asarray(z, dtype=np.float64)
+    norm = np.sqrt((z * z).sum(0))
+    blocks, start, anchor = [], 0, 0
+    for j in range(1, z.shape[1]):
+        if norm[j] == 0:
+            continue
+        if norm[anchor] == 0:               # block so far is monomorphic: j becomes its anchor
+            anchor = j
+            continue
+        r = float(z[:, anchor] @ z[:, j]) / (norm[anchor] * norm[j])
+        if r * r < r2:
+            blocks.append(np.arange(start, j))
+            start = anchor = j
+    blocks.append(np.arange(start, z.shape[1]))
+    return blocks
+
+
 class DosageWindowLayout:
     # The fitted part of option F: dosage standardisation and PCs (a
     # DosagePCAProjector) and the window layout. Plays the projector's role in
@@ -42,9 +77,11 @@ class DosageWindowLayout:
 
     kind = 'widiv_dosage_windows'
 
-    def __init__(self, window_size=200, n_pcs=32):
+    def __init__(self, window_size=200, n_pcs=32, ld_r2=None):
         self.window_size = int(window_size)
         self.n_pcs = int(n_pcs)
+        # None: fixed windows of window_size SNPs. A number: LD-block windows (ld_blocks).
+        self.ld_r2 = None if ld_r2 is None else float(ld_r2)
         self.pca = None
         self.windows = None             # one list of matrix columns per window, genome order
         self.window_chromosome = None
@@ -81,14 +118,24 @@ class DosageWindowLayout:
         self.positions = positions.tolist()
         order = np.lexsort((positions, chromosomes))
         self.windows, self.window_chromosome = [], []
+        z = self.pca._standardize(dosage) if self.ld_r2 is not None else None
         for c in dict.fromkeys(chromosomes[order].tolist()):
             cols = order[chromosomes[order] == c]
-            for start in range(0, len(cols), self.window_size):
-                self.windows.append(cols[start:start + self.window_size].tolist())
+            if self.ld_r2 is not None:
+                blocks = ld_blocks(z[:, cols], self.ld_r2)
+            else:
+                blocks = [np.arange(s, min(s + self.window_size, len(cols)))
+                          for s in range(0, len(cols), self.window_size)]
+            for b in blocks:
+                self.windows.append(cols[b].tolist())
                 self.window_chromosome.append(c)
         if verbose:
-            print(f"  {self.n_windows} windows of up to {self.window_size} SNPs on "
-                  f"{len(set(self.window_chromosome))} chromosomes, plus {self.n_pcs} PCs")
+            sizes = [len(w) for w in self.windows]
+            kind = (f"LD blocks (r^2 >= {self.ld_r2:g} with the block's first SNP) of "
+                    f"{min(sizes)}-{max(sizes)} SNPs, median {int(np.median(sizes))}"
+                    if self.ld_r2 is not None else f"windows of up to {self.window_size} SNPs")
+            print(f"  {self.n_windows} {kind} on {len(set(self.window_chromosome))} chromosomes, "
+                  f"plus {self.n_pcs} PCs")
         return self
 
     @property
@@ -149,11 +196,14 @@ class DosageWindowLayout:
         return {'kind': self.kind, 'window_size': self.window_size, 'n_pcs': self.n_pcs,
                 'pca': self.pca.state_dict(), 'windows': self.windows,
                 'window_chromosome': self.window_chromosome, 'snp_names': self.snp_names,
-                'positions': self.positions, 'qtl_columns': self.qtl_columns, 'qtl_beta': self.qtl_beta}
+                'positions': self.positions, 'qtl_columns': self.qtl_columns, 'qtl_beta': self.qtl_beta,
+                'ld_r2': self.ld_r2}
 
+    # The saved windows are used as they are, so a checkpoint loads the same
+    # blocks it was trained with whatever ld_blocks would find today.
     @classmethod
     def from_state_dict(cls, state):
-        obj = cls(state['window_size'], state['n_pcs'])
+        obj = cls(state['window_size'], state['n_pcs'], state.get('ld_r2'))
         obj.pca = DosagePCAProjector.from_state_dict(state['pca'])
         obj.windows = [list(map(int, w)) for w in state['windows']]
         obj.window_chromosome = list(state['window_chromosome'])
@@ -224,6 +274,12 @@ class GatedDosageWindowEncoder(nn.Module):
             self.snp_scale.copy_(torch.as_tensor(pca.scale_))
             self.pca_components.copy_(torch.as_tensor(pca.components_))
             self.window_index.copy_(torch.as_tensor(layout.gather_index()))
+            if getattr(layout, 'ld_r2', None) is not None:
+                # LD blocks differ in size (5 to hundreds of SNPs); the default init
+                # scales every window by the widest, which would leave a 5-SNP block's
+                # features near zero. Rescale each to start at about unit spread.
+                n = torch.tensor([len(w) for w in layout.windows], dtype=self.window_weight.dtype)
+                self.window_weight.mul_(torch.sqrt(self.window_width / n)[:, None, None])
             if self.n_qtl:
                 self.qtl_index.copy_(torch.as_tensor(layout.qtl_columns))
                 self.qtl_beta.copy_(torch.as_tensor(layout.qtl_beta))

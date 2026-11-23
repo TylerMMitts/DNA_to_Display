@@ -427,6 +427,14 @@ def main(overrides=None):
         # SNPs per window: about 460 windows of 200, none crossing a chromosome.
         # WIDIV_WINDOW_SIZE overrides it.
         window_size = int(os.environ.get('WIDIV_WINDOW_SIZE', 200))
+        # LD-block windows instead of fixed ones (snp_encoding 'windows' only): a
+        # window is a run of SNPs each in r^2 >= this with the run's first SNP, found
+        # on the training lines' genotypes (widiv_window_encoding.ld_blocks), so the
+        # windows follow the recombination landscape; window_size is then unused.
+        # On RIL v5, 0.5 gives 146 blocks of 5-495 SNPs. None keeps fixed windows.
+        # WIDIV_WINDOW_LD_R2 sets it (e.g. 0.5).
+        window_ld_r2 = (float(os.environ['WIDIV_WINDOW_LD_R2'])
+                        if os.environ.get('WIDIV_WINDOW_LD_R2') else None)
         # PCs kept beside the windows for population structure. WIDIV_WINDOW_PCS overrides it.
         window_pcs = int(os.environ.get('WIDIV_WINDOW_PCS', 32))
         # Features each window's SNPs are mapped to.
@@ -554,6 +562,10 @@ def main(overrides=None):
         raise SystemExit("qtl_only keeps only the QTL; it cannot also leave them out")
     if qtl_only and cfg.qtl_path is None:
         raise SystemExit(f"{WIDIV_DATASET} has no default QTL table; set WIDIV_QTL_TABLE")
+    if cfg.window_ld_r2 is not None and cfg.snp_encoding != 'windows':
+        raise SystemExit("window_ld_r2 (LD-block windows) is only implemented for snp_encoding='windows'")
+    if cfg.window_ld_r2 is not None and not 0 < cfg.window_ld_r2 < 1:
+        raise SystemExit(f"window_ld_r2 must be between 0 and 1, not {cfg.window_ld_r2}")
     if cfg.pca_match_heldout and (windows or cfg.orthogonalize_qtl):
         raise SystemExit("pca_match_heldout is only implemented for snp_encoding='pca' "
                          "without orthogonalize_qtl")
@@ -563,8 +575,10 @@ def main(overrides=None):
     qtl_removal = {'exclude_qtl_kb': cfg.exclude_qtl_kb, 'orthogonalize_qtl': cfg.orthogonalize_qtl}
     encoding_name = ('widiv_dosage_hybrid' if hybrid else 'widiv_dosage_windows' if windows
                      else 'widiv_dosage_qtl_only' if qtl_only else 'widiv_dosage_pca')
-    window_settings = (cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
-                       cfg.window_warmup_epochs, cfg.window_ramp_epochs)
+    # ld_r2 is appended only when set, so fixed-window checkpoints still resume.
+    window_settings = ((cfg.window_size, cfg.window_pcs, cfg.window_dim, cfg.window_sparsity,
+                        cfg.window_warmup_epochs, cfg.window_ramp_epochs)
+                       + ((cfg.window_ld_r2,) if cfg.window_ld_r2 is not None else ()))
     hybrid_settings = ((cfg.hybrid_summary_pcs, cfg.hybrid_window_dropout, cfg.hybrid_summary_tokens)
                        if hybrid else None)
     preset = SIZE_PRESETS[size]
@@ -574,8 +588,9 @@ def main(overrides=None):
                                 + ('_zmean' if cfg.latent_target == 'mean' else '')
                                 + ('_scaled' if cfg.latent_scaling == 'channel' else '')
                                 + ('_layout' if cfg.layout_channel else '')
-                                + (f'_windows{cfg.window_size}_pc{cfg.window_pcs}'
-                                   f'_sp{cfg.window_sparsity:.0e}' if windows else '')
+                                + ((f'_ldwindows{cfg.window_ld_r2:g}' if cfg.window_ld_r2 is not None
+                                    else f'_windows{cfg.window_size}')
+                                   + f'_pc{cfg.window_pcs}_sp{cfg.window_sparsity:.0e}' if windows else '')
                                 + (f'_hybrid{cfg.hybrid_summary_pcs}_drop{cfg.hybrid_window_dropout:g}'
                                    if hybrid else '')
                                 + ('_qtlonly' if qtl_only else '')
@@ -720,7 +735,7 @@ def main(overrides=None):
         elif windows:
             snp_map = pd.read_csv(resolve_input(cfg.snp_map_path, 'WiDiv SNP map')).set_index('snp')
             snp_map = snp_map.loc[snp_names]
-            projector = DosageWindowLayout(cfg.window_size, cfg.window_pcs).fit(
+            projector = DosageWindowLayout(cfg.window_size, cfg.window_pcs, ld_r2=cfg.window_ld_r2).fit(
                 dosage[fit_rows], snp_names, snp_map['chr'].to_numpy(), snp_map['pos'].to_numpy(),
                 orthogonalize_columns=qtl_cols if cfg.orthogonalize_qtl else None)
             print(f"  window sparsity {cfg.window_sparsity:g} per open window after a "

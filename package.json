@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "description": "Builds the poster and talk decks (code/build_poster.js, code/build_talk_deck.js)",
+  "dependencies": {
+    "pptxgenjs": "*"
+  },
+  "overrides": {
+    "@types/node": "22.20.2"
+  }
+}

@@ -54,3 +54,11 @@ build/
 *.jpg
 *.jpeg
 *.txt
+
+# The conference talk: the deck, the figures it is built from, and older versions.
+# All of it is large and binary, and make_hook_assets.py, make_talk_assets.py and
+# build_talk_deck.js rebuild it from the models and the data.
+/presentation/
+
+# pptxgenjs and its dependencies for the deck and poster builders (npm install).
+node_modules/

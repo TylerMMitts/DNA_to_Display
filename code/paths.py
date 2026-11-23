@@ -112,6 +112,19 @@ SYNTHETIC_STELE_RESULTS_DIR = RESULTS_DIR / 'synthetic_stele'
 SYNTHETIC_STELE_RUN = 'diffusion_onehot_synthetic_stele'
 SYNTHETIC_STELE_MODEL_DIR = MODELS_DIR / SYNTHETIC_STELE_RUN
 
+# The conference talk: the deck, the figures it is built from, and older versions.
+# Outside results/ because it is the deliverable rather than an analysis output,
+# and git ignores the whole folder - decks and their figures are large, binary,
+# and rebuilt from the scripts.
+PRESENTATION_DIR = PROJECT_ROOT / 'presentation'
+TALK_DECK = PRESENTATION_DIR / 'DNA_to_Display_talk.pptx'
+# Figures for the talk, and the hook's images and hook.json, which the deck
+# builder reads to name the genotype it shows.
+TALK_ASSETS_DIR = PRESENTATION_DIR / 'assets'
+HOOK_ASSETS_DIR = PRESENTATION_DIR / 'hook_assets'
+# Superseded decks and figure sets, kept rather than deleted.
+PRESENTATION_ARCHIVE_DIR = PRESENTATION_DIR / 'archive'
+
 # The root SNP table already pivoted into a genotype x locus matrix. Reading and
 # pivoting the parquet takes about nine seconds every time, which is most of the
 # wait before a live test can start; the cache loads in a fraction of a second

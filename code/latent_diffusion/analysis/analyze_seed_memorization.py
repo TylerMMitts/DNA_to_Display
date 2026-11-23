@@ -31,8 +31,10 @@ from paths import (
 )
 
 from latent_diffusion.models.snp_encoder import load_seed_snp_data_from_parquet
-from latent_diffusion.analysis.analyze_snp_attention import load_model
-from latent_diffusion.analysis.analyze_genotype_memorization import wrong_partners
+from latent_diffusion.analysis.analyze_snp_attention import load_model, load_similarity
+from latent_diffusion.analysis.analyze_genotype_memorization import (
+    pool_relatedness, wrong_partners,
+)
 from latent_diffusion.diffusion.scheduler import DiffusionScheduler
 # Taken from the seed trainer, so kernels are prepared exactly as in training.
 from latent_diffusion.training.train_seeds import load_litevae, make_transforms
@@ -49,6 +51,12 @@ def main(overrides=None):
         image_dir = SEED_SCALED_DIR
         pca_cache = SEED_RESULTS_DIR / 'pca.pkl'
         output_dir = SEED_RESULTS_DIR / 'genotype_memorization'
+
+        # Which genotype stands in as the wrong one; see the root version. The
+        # seed population has no kinship matrix in the dataset, so relatedness
+        # is correlation between raw SNP vectors instead.
+        partner = 'least related'
+        kinship = None
 
         # Spread across the schedule. Memorisation shows most in the middle:
         # at the lowest noise every model does well and at the highest none can.
@@ -116,7 +124,15 @@ def main(overrides=None):
         sel = splits == split
         print(f"  {split:9s} {int(sel.sum()):4d} kernels from "
               f"{len(set(genotypes[sel])):3d} genotypes")
-    partners = wrong_partners(genotypes, splits, cfg.seed)
+    similarity, sim_names, sim_source = load_similarity(cfg.kinship, names, snp_matrix)
+    partners, relatedness = wrong_partners(genotypes, splits, cfg.seed, similarity,
+                                           sim_names, cfg.partner)
+    print(f"  wrong genotype: {cfg.partner} in the same split, by {sim_source}")
+    for split in ('trained', 'held out'):
+        sel = splits == split
+        print(f"    {split:9s} mean relatedness to its partner "
+              f"{np.nanmean(relatedness[sel]):.3f}  "
+              f"(average pair in that split {pool_relatedness(genotypes, splits, split, similarity, sim_names):.3f})")
 
     # Latents are encoded once, seeded, so every timestep sees the same ones.
     transform = make_transforms(cfg.image_size, False)
@@ -153,6 +169,8 @@ def main(overrides=None):
                     for k, value in enumerate(loss.mean(dim=(1, 2, 3)).cpu().numpy()):
                         rows.append({'image': items[start + k][0].name,
                                      'genotype': genotypes[start + k],
+                                     'wrong_genotype': partners[start + k],
+                                     'relatedness': float(relatedness[start + k]),
                                      'split': splits[start + k], 'timestep': t,
                                      'condition': condition, 'loss': float(value)})
             print(f"  t={t} done")
@@ -178,6 +196,12 @@ def main(overrides=None):
         'n_trained_genotypes': len(set(genotypes[splits == 'trained'])),
         'n_held_out_genotypes': len(set(genotypes[splits == 'held out'])),
         'timesteps': list(cfg.timesteps),
+        'partner': cfg.partner,
+        'similarity_source': sim_source,
+        'partner_relatedness': {s: float(np.nanmean(relatedness[splits == s]))
+                                for s in ('trained', 'held out')},
+        'pool_relatedness': {s: pool_relatedness(genotypes, splits, s, similarity, sim_names)
+                             for s in ('trained', 'held out')},
         'loss': {f'{s} / {c}': float(v) for (s, c), v in means.items()},
         'genotype_gain_trained': gain('trained'),
         'genotype_gain_held_out': gain('held out'),

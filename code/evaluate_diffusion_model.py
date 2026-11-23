@@ -85,9 +85,17 @@ def build_steps(checkpoint, d):
             'checkpoint': checkpoint, 'output_dir': d / 'snp_diverse_maps', 'pca_cache': pca,
             'sensitivity_cache': d / 'snp_diverse_maps' / 'population_sensitivity.csv',
         }, []),
+        # tissue_spread screens candidates on the decoded image and keeps loci
+        # acting in different tissues, falling back to the spatial-diversity
+        # selection when none of them does. On the epoch 300 root model none
+        # did: all 96 screened loci were cortex-led, which is worth knowing
+        # about a checkpoint and is written to tissue_screen.csv either way.
+        # The screen is cached per locus, so a rerun does not repeat it.
         'snp_output_contribution': ('latent_diffusion.analysis.snp_output_contribution', {
             'checkpoint': checkpoint, 'output_dir': d / 'snp_output_contribution',
             'diverse_csv': d / 'snp_diverse_maps' / 'diverse_snp_details.csv',
+            'candidate_csv': d / 'snp_diverse_maps' / 'candidate_pool.csv',
+            'tissue_spread': 24, 'top_n': 5,
         }, ['snp_diverse_maps']),
         'parent_archetypes': ('latent_diffusion.generation.generate_parent_archetypes', {
             'checkpoint': checkpoint, 'output_dir': d / 'parent_archetypes', 'pca_cache': pca,

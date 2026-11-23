@@ -12,6 +12,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 import numpy as np
 import pandas as pd
 import torch
@@ -98,8 +99,11 @@ def safe_corr(a, b, method='pearson'):
     return float(s['a'].corr(s['b'], method=method))
 
 
+# caption=False drops the explanatory note under the numbers. The talk says the
+# same thing out loud, where it does not have to be read at 8.5pt from the back
+# of a room.
 def save_pair_figure(name, genotype, real_img, real_masks, real_traits,
-                     gen_img, gen_masks, gen_traits, save_path):
+                     gen_img, gen_masks, gen_traits, save_path, caption=True):
     fig = plt.figure(figsize=(13, 4.6))
     grid = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.25], wspace=0.06)
 
@@ -130,27 +134,93 @@ def save_pair_figure(name, genotype, real_img, real_masks, real_traits,
             va='top', ha='left', transform=ax.transAxes)
     ax.text(0.0, 0.34, 'red = root   green = stele   blue = vessel',
             fontsize=8.5, color='0.35', va='top', transform=ax.transAxes)
-    ax.text(0.0, 0.02,
-            'The generated image is a sample for this genotype,\n'
-            'not a reconstruction of this specific photo, so\n'
-            'per-image difference is expected to be nonzero.\n'
-            'Genotype-level tracking is the real test.',
-            fontsize=8.5, color='0.35', va='bottom', transform=ax.transAxes)
+    if caption:
+        ax.text(0.0, 0.02,
+                'The generated image is a sample for this genotype,\n'
+                'not a reconstruction of this specific photo, so\n'
+                'per-image difference is expected to be nonzero.\n'
+                'Genotype-level tracking is the real test.',
+                fontsize=8.5, color='0.35', va='bottom', transform=ax.transAxes)
 
     fig.suptitle(f'{name}   genotype {genotype}', fontsize=10, y=0.99)
     fig.savefig(save_path, dpi=140, bbox_inches='tight')
     plt.close(fig)
 
 
-def save_genotype_scatter(geno_df, stats, save_path):
+# The genotypes a checkpoint never trained on, from the checkpoint's own record.
+#
+# Only the record is used. train_vs_test_accuracy.py can reconstruct a legacy
+# split from a seed, but a figure that colours points as "never seen" should not
+# rest on a reconstruction, so an older checkpoint just gets the plain scatter.
+def held_out_genotypes(checkpoint_path):
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    held = ckpt.get('val_genotypes')
+    return set(held) if held else None
+
+
+# One row per genotype: its mean on each side and the standard error of that
+# mean. The mean columns keep their names, so every statistic computed from
+# them is unchanged; the _sem columns are for showing how far each point could
+# move with a different handful of images. A genotype with one image has no
+# standard error and gets none.
+def genotype_means(df):
+    agg = {'n_images': ('filename', 'size')}
+    for k, _, _ in TRAITS:
+        for side in ('real', 'gen'):
+            agg[f'{side}_{k}'] = (f'{side}_{k}', 'mean')
+    for k, _, _ in TRAITS:
+        for side in ('real', 'gen'):
+            agg[f'{side}_{k}_sem'] = (f'{side}_{k}', 'sem')
+    return df.groupby('genotype').agg(**agg).reset_index()
+
+
+# held_out, when given, is the set of genotypes the checkpoint never trained on.
+# Those are drawn in a second colour on top of the rest, so whether the unseen
+# lines sit on the same cloud as the trained ones can be read off directly.
+#
+# Each point is a genotype mean over several images, so it carries a standard
+# error ellipse when genotype_means() supplied one. A table
+# written before those columns existed is drawn without them.
+def save_genotype_scatter(geno_df, stats, save_path, held_out=None):
+    is_held = (geno_df['genotype'].isin(held_out).to_numpy()
+               if held_out else np.zeros(len(geno_df), dtype=bool))
     fig, axes = plt.subplots(1, len(TRAITS), figsize=(4.0 * len(TRAITS), 4.2))
     for ax, (key, label, _) in zip(np.atleast_1d(axes), TRAITS):
         real = geno_df[f'real_{key}'].to_numpy(dtype=float)
         gen = geno_df[f'gen_{key}'].to_numpy(dtype=float)
         good = np.isfinite(real) & np.isfinite(gen)
-        ax.scatter(real[good], gen[good], s=26, alpha=0.75, edgecolor='none')
+        has_sem = f'real_{key}_sem' in geno_df and f'gen_{key}_sem' in geno_df
+        if has_sem:
+            # One translucent ellipse per genotype, one standard error across
+            # (real) and up (generated). nan_to_num: a single-image genotype has
+            # no standard error and gets a zero-size ellipse, so none shows.
+            real_sem = np.nan_to_num(geno_df[f'real_{key}_sem'].to_numpy(dtype=float))
+            gen_sem = np.nan_to_num(geno_df[f'gen_{key}_sem'].to_numpy(dtype=float))
+            # A faint fill with a thin outline keeps single ellipses readable
+            # where many overlap.
+            for i in np.flatnonzero(good & ((real_sem > 0) | (gen_sem > 0))):
+                held = bool(held_out) and is_held[i]
+                rgb = matplotlib.colors.to_rgb('#ff7f0e' if held else '#1f77b4')
+                ax.add_patch(Ellipse((real[i], gen[i]), 2 * real_sem[i], 2 * gen_sem[i],
+                                     facecolor=(*rgb, 0.07 if held else 0.04),
+                                     edgecolor=(*rgb, 0.5 if held else 0.3),
+                                     linewidth=0.6, zorder=2 if held else 1))
+        else:
+            real_sem = gen_sem = np.zeros_like(real)
+        if held_out:
+            tr, ho = good & ~is_held, good & is_held
+            ax.scatter(real[tr], gen[tr], s=26, alpha=0.6, edgecolor='none',
+                       color='#1f77b4', label=f'trained ({tr.sum()})')
+            ax.scatter(real[ho], gen[ho], s=34, alpha=0.95, edgecolor='white',
+                       linewidth=0.6, color='#ff7f0e', zorder=3,
+                       label=f'held out ({ho.sum()})')
+        else:
+            ax.scatter(real[good], gen[good], s=26, alpha=0.75, edgecolor='none')
 
         if good.sum():
+            # Limits follow the points, not the ellipses: a genotype with two
+            # very different images would otherwise stretch the axes and squash
+            # the cloud. Its ellipse runs off the edge instead.
             lo = float(min(real[good].min(), gen[good].min()))
             hi = float(max(real[good].max(), gen[good].max()))
             pad = 0.05 * (hi - lo or 1.0)
@@ -361,10 +431,7 @@ def main(overrides=None):
     df.to_csv(out / 'per_image_measurements.csv', index=False)
 
     # Dataset-level analysis
-    geno = df.groupby('genotype').agg(
-        n_images=('filename', 'size'),
-        **{f'{side}_{k}': (f'{side}_{k}', 'mean')
-           for k, _, _ in TRAITS for side in ('real', 'gen')}).reset_index()
+    geno = genotype_means(df)
     geno.to_csv(out / 'genotype_means.csv', index=False)
 
     stats = {}
@@ -404,7 +471,8 @@ def main(overrides=None):
         }
 
     pd.DataFrame(stats).T.to_csv(out / 'trait_statistics.csv')
-    save_genotype_scatter(geno, stats, out / 'genotype_scatter.png')
+    save_genotype_scatter(geno, stats, out / 'genotype_scatter.png',
+                          held_out=held_out_genotypes(checkpoint_path))
     save_summary_figure(stats, out / 'summary.png')
 
     with open(out / 'summary.json', 'w') as f:

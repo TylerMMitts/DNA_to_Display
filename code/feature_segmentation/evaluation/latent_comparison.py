@@ -205,6 +205,69 @@ def pca_latent_space(z_reals, z_gens, n_components=10, seed=0):
     }
 
 
+# The same latent space, restricted to genotypes the model never trained on.
+#
+# Points use the PCA fitted on every image, not a refit on the subset, so the
+# axes match pca_latent_space.png and the two figures can be laid side by side.
+# The generated colour is chosen to stand well clear of the real one, since the
+# point of the figure is whether the two clouds separate.
+#
+# The right-hand panel puts the held-out lines next to the trained ones on the
+# per-image distance scale: 0 is as close as two real roots of the same line, 1
+# is no closer than two unrelated lines.
+def save_held_out_pca_figure(pca, real_c, gen_c, held, positions, separations,
+                             save_path):
+    ev = pca.explained_variance_ratio_
+    real_col, gen_col = 'seagreen', '#FF4F14'
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8),
+                             gridspec_kw={'width_ratios': [1.15, 1, 0.75]})
+
+    ax = axes[0]
+    ax.scatter(real_c[held, 0], real_c[held, 1], s=26, alpha=0.7,
+               label=f'real ({held.sum()})', color=real_col, edgecolor='none')
+    ax.scatter(gen_c[held, 0], gen_c[held, 1], s=26, alpha=0.8,
+               label=f'generated ({held.sum()})', color=gen_col, edgecolor='none')
+    ax.scatter(*real_c[held, :2].mean(axis=0), s=240, marker='X', color='darkgreen',
+               edgecolor='white', linewidth=1.5, zorder=5)
+    ax.scatter(*gen_c[held, :2].mean(axis=0), s=240, marker='X', color='#9E2A00',
+               edgecolor='white', linewidth=1.5, zorder=5)
+    ax.set_xlabel(f'PC1 ({ev[0]*100:.1f}% var)')
+    ax.set_ylabel(f'PC2 ({ev[1]*100:.1f}% var)')
+    ax.set_title('Held-out lines only, same axes as the full figure\n'
+                 f'(X = centroid, separation = {separations["held out"]:.3f})')
+    ax.legend(fontsize=9)
+
+    ax = axes[1]
+    for coords, label, color in ((real_c[held], 'real', real_col),
+                                 (gen_c[held], 'generated', gen_col)):
+        ax.hist(coords[:, 0], bins=25, alpha=0.6, label=label, color=color,
+                density=True)
+    ax.set_xlabel('PC1')
+    ax.set_ylabel('density')
+    ax.set_title('PC1 marginal distribution, held-out lines')
+    ax.legend(fontsize=9)
+
+    ax = axes[2]
+    names = list(positions)
+    ax.bar(names, [positions[n] for n in names],
+           color=['steelblue' if n == 'trained' else gen_col for n in names])
+    ax.axhline(0, color='0.3', lw=1)
+    ax.axhline(1, color='0.3', lw=1, ls='--')
+    ax.text(1.45, 1.0, 'unrelated\nline', va='center', ha='left', fontsize=8, color='0.3')
+    ax.text(1.45, 0.0, 'same-line\nreplicate', va='center', ha='left', fontsize=8,
+            color='0.3')
+    for i, n in enumerate(names):
+        ax.text(i, positions[n], f'{positions[n]:.2f}', ha='center',
+                va='bottom' if positions[n] >= 0 else 'top', fontsize=10)
+    ax.set_xlim(-0.6, 2.2)
+    ax.set_ylabel('distance to its own real image\n(0 = replicate, 1 = unrelated)')
+    ax.set_title('How close each generated latent is\nto the real image it pairs with')
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
 def save_pca_figure(pca, real_c, gen_c, stats, save_path):
     ev = pca.explained_variance_ratio_
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
@@ -299,6 +362,11 @@ def main(overrides=None):
         litevae_checkpoint = LITEVAE_MODEL
 
         output_dir = RESULTS_DIR / 'latent_comparison'
+
+        # The diffusion checkpoint that made the generated images. Set, it adds
+        # pca_latent_space_held_out.png for the genotypes it never trained on;
+        # None skips that, since the split cannot be known without it.
+        checkpoint = None
 
         # Per-image figures are capped; the statistics always use everything.
         # None -> a figure for every image.
@@ -421,6 +489,33 @@ def main(overrides=None):
     span = diff_mean - same_mean
     position = (gen_mean - same_mean) / span if np.isfinite(span) and span > 0 else float('nan')
 
+    # The held-out lines on their own, when the checkpoint names them. Same
+    # baselines and same PCA as the full figure, so only the images change.
+    held_stats = None
+    if cfg.checkpoint:
+        from feature_segmentation.evaluation.genetic_fidelity_test import held_out_genotypes
+        held_set = held_out_genotypes(resolve_input(cfg.checkpoint, 'checkpoint'))
+        if held_set:
+            held = df['genotype'].isin(held_set).to_numpy()
+
+            def separation(mask):
+                r = z_reals[mask].reshape(mask.sum(), -1)
+                g = z_gens[mask].reshape(mask.sum(), -1)
+                pooled = np.sqrt((r.var(axis=0, ddof=1).sum() + g.var(axis=0, ddof=1).sum()) / 2)
+                return float(np.linalg.norm(g.mean(axis=0) - r.mean(axis=0)) / pooled)
+
+            def place(mask):
+                return float((df['l2_distance'][mask].mean() - same_mean) / span)
+
+            positions = {'trained': place(~held), 'held out': place(held)}
+            separations = {'trained': separation(~held), 'held out': separation(held)}
+            save_held_out_pca_figure(pca, real_c, gen_c, held, positions, separations,
+                                     out / 'pca_latent_space_held_out.png')
+            held_stats = {'n_images_held_out': int(held.sum()),
+                          'n_genotypes_held_out': int(df['genotype'][held].nunique()),
+                          'position_between_baselines': positions,
+                          'pca_centroid_separation': separations}
+
     # How well latent distance separates same-genotype from different-genotype
     # pairs at all, as a standardised effect size. This has to be checked before
     # `position` means anything: position divides by the gap between the two
@@ -449,6 +544,7 @@ def main(overrides=None):
         'mean_norm_generated': float(df['gen_norm'].mean()),
         'pca_centroid_distance': pca_stats['centroid_distance'],
         'pca_centroid_separation': pca_stats['centroid_separation'],
+        'held_out': held_stats,
         'pca_explained_variance_ratio': pca_stats['explained_variance_ratio'],
     }
     with open(out / 'summary.json', 'w') as f:

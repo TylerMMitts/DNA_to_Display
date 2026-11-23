@@ -437,7 +437,6 @@ pick up the seed SNP table and seed LiteVAE through
 so nothing has to be set by hand. The per-gene maps have no tissue breakdown
 on kernels, since that needs the root segmenter.
 
-
 The root segmenter has nothing to find in a kernel, so `kernel_traits` measures
 kernels from their pixels. Every scaled image is one kernel on white at 19.4
 px/mm, so the kernel is everything that is not white, and:
@@ -482,6 +481,29 @@ sbatch code/evaluate_seed_diffusion_model_hellbender.sbatch
 The root SNP attention and contribution analyses are not part of this yet: they
 read the root SNP table format, and the seed table names its founders rather
 than numbering them.
+
+## Testing models interactively
+
+[code/model_toolkit.py](code/model_toolkit.py) loads a trained root checkpoint
+once and exposes the SNP encoder, genotype editing (founder lines, locus swaps,
+recombinants), generation, segmenter trait measurement and per-genotype
+denoising scores as plain function calls, for trying ideas quickly rather than
+running a full analysis:
+
+```python
+from model_toolkit import load_session, save_grid, output_dir
+s = load_session(300)                          # epoch 300 of the medium model
+images = s.generate(['MEMA020', s.swap('MEMA020', slice(0, 20000), 5)], seeds=[0, 1, 2])
+save_grid(images, output_dir('swap_test') / 'grid.png')
+```
+
+Output goes to `results/playground/`. To check a machine can run all of it:
+
+```bash
+uv run --offline --locked code/check_model_toolkit.py
+```
+
+The full reference, with measured timings, is in [claude.md](claude.md).
 
 ## Notes on running this
 

@@ -99,6 +99,9 @@ TRAINING_RESULTS_DIR = RESULTS_DIR / 'training'
 # valid for the model that produced them.
 MODEL_ANALYSIS_DIR = RESULTS_DIR / 'model_analysis'
 
+# Whatever a quick live test with model_toolkit.py produces, one folder per test.
+PLAYGROUND_DIR = RESULTS_DIR / 'playground'
+
 # The synthetic-stele experiment: a copy of the SNP table with extra genes whose
 # founder code follows each genotype's measured stele size, a model trained on
 # it, and its results. Kept in folders of its own so nothing in it can be read
@@ -109,6 +112,12 @@ SYNTHETIC_STELE_RESULTS_DIR = RESULTS_DIR / 'synthetic_stele'
 SYNTHETIC_STELE_RUN = 'diffusion_onehot_synthetic_stele'
 SYNTHETIC_STELE_MODEL_DIR = MODELS_DIR / SYNTHETIC_STELE_RUN
 
+# The root SNP table already pivoted into a genotype x locus matrix. Reading and
+# pivoting the parquet takes about nine seconds every time, which is most of the
+# wait before a live test can start; the cache loads in a fraction of a second
+# and is rebuilt automatically whenever the parquet changes.
+SNP_MATRIX_CACHE = RESULTS_DIR / 'cache' / 'snp_matrix.npz'
+
 # The stem used for checkpoint filenames, keyed by the folder holding them.
 # Kept in one place so a rename only has to happen here.
 MODEL_NAMES = {
@@ -116,8 +125,8 @@ MODEL_NAMES = {
     LITEVAE_DIR: 'litevae',
     SEED_LITEVAE_DIR: 'litevae_seeds',
     DIFFUSION_ONEHOT_DIR: 'diffusion_onehot',
-    DIFFUSION_NUMERIC_DIR: 'diffusion_numeric',
     DIFFUSION_ONEHOT_MEDIUM_DIR: 'diffusion_onehot_medium',
+    DIFFUSION_NUMERIC_DIR: 'diffusion_numeric',
     SYNTHETIC_STELE_MODEL_DIR: SYNTHETIC_STELE_RUN,
 }
 

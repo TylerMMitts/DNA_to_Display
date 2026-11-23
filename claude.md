@@ -186,3 +186,73 @@ The AI will guide you through organizing your raw LAT data into the standardized
 - **User Guidance**: Ask clarifying questions only when truly ambiguous
 - **No Hardcoded Paths**: Work with whatever the user provides
 - **Complete Automation**: End result should be a fully organized, ready-to-process dataset
+
+
+## Live testing on this machine
+
+For running and testing ideas against trained models in real time, such as
+during a meeting. Never train here - training runs on Hellbender.
+
+**Environment.** Run everything through uv, which uses the `.venv` built from
+`pyproject.toml` / `uv.lock` (Python 3.11, torch 2.6 CUDA 12.4, RTX 3050 with
+4 GB):
+
+```
+uv run --offline --locked --project D:/DNA_to_Display python path/to/script.py
+```
+
+`--offline --locked` means nothing is resolved or downloaded, so it works with
+no network. `--project` makes it use this project's `.venv` from any working
+directory, including for scripts in the scratchpad. If something seems wrong with the machine, `uv run --offline
+--locked code/preflight.py` diagnoses it, and `code/check_model_toolkit.py`
+exercises the whole toolkit on epochs 300 and 500.
+
+**The toolkit.** [code/model_toolkit.py](code/model_toolkit.py) loads a root
+checkpoint once and exposes what a test needs. For a one-off request, write a
+short script in the scratchpad that imports it and saves output with
+`output_dir(name)`, which lands in `results/playground/<name>/`:
+
+```python
+import sys; sys.path.insert(0, r'D:\DNA_to_Display\code')
+from model_toolkit import load_session, measure, output_dir, save_grid
+s = load_session(300)        # 300 / 500 / 25 = medium epochs, 'best', 'original', or a path
+```
+
+| Call | Returns |
+|---|---|
+| `s.genotypes`, `s.loci`, `s.founders`, `s.matrix` | the 200 genotypes, 43,788 loci, founders 1-8, codes |
+| `s.group(g)`, `s.genotypes_in('held out')` | 'trained', 'held out' or 'never imaged' for this checkpoint |
+| `s.codes(x)` | founder codes; every call below accepts a name, a list of names, or codes |
+| `s.image_paths(g)`, `s.real_images(g, n)` | real cropped images, uint8 256x256 |
+| `s.project(x)`, `s.embed(x)` | PCA scores (N, 168); encoder tokens (N, 8, 256) |
+| `s.distance(a, b)`, `s.nearest(x, k, space)` | loci/PCA/token distances; nearest real genotypes |
+| `s.founder_share(x)` | share of loci from each founder |
+| `s.founder_line(f)`, `s.swap(x, loci, source)`, `s.recombinant(parents, n_blocks, seed)` | edited genotypes as codes |
+| `s.generate(x, seeds, steps)` | images (genotypes, seeds, 256, 256, 3); same seed = same noise across genotypes |
+| `s.denoise_loss(images, conditions, timesteps)` | image x condition denoising error, shared noise; lower = the genotype fits the image better |
+| `measure(images)` | segmenter traits per image (root/stele diameter, vessel area/count, ratio) |
+| `save_grid(images, path, row_labels, col_labels)` | labelled contact sheet |
+
+**Timing, measured.** A typical request from a fresh process - load epoch 300,
+edit a genotype, generate 8 images at 50 steps, measure them and save a grid -
+takes about 14 s end to end: 8 s of imports and loading, 4 s generating, 1 s
+measuring. Warm, 3 images take about 1 s and `denoise_loss` under 1 s. The
+very first `measure` or `generate` after a reboot can take about 10 s longer
+while the disk cache and CUDA warm up. A second checkpoint in the same script
+loads in about 3.5 s and shares the SNP table, LiteVAE and segmenter, so put
+comparisons in one script. Keep `generate` batches at 8 or fewer on 4 GB.
+
+**Reading results honestly.**
+- Held-out genotypes are held out of the diffusion model's training only; the
+  PCA inside the SNP encoder was fitted on all 200.
+- Locus order is the parquet's column order, sorted by gene ID, which is not
+  strictly genomic position, so a "block" of loci is not a guaranteed
+  haplotype block.
+- `measure` uses the 512 px segmenter trained 2026-09-17. On images it never
+  trained on, its errors were: vessel count 0.59, vessel area about 4%, root
+  diameter 1.6 px, stele diameter 1.9 px (cross_validate_segmentation.py).
+  Trait values from before that date used unfilled masks - root diameter about
+  38 px too small - and are not comparable. Generated roots were not part of
+  that validation.
+- Locally, `'best'` is epoch 25 - the Hellbender run's best checkpoint was
+  not copied here.

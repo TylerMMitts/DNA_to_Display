@@ -1,0 +1,4 @@
+workspace/
+__pycache__/
+# Training bundles and results zips (hundreds of MB): copied between machines, never committed.
+*.zip

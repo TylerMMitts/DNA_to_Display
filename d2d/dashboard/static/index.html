@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DNA to Display</title>
+<style>
+:root {
+  --bg: #0b0b0a; --panel: #131311; --panel-2: #191916; --raise: #20201c; --ink: #ebe7dc; --muted: #8e8a7f; --faint: #5f5c54;
+  --line: #262521; --line-2: #34332d; --gold: #f1b82d; --gold-text: #f1b82d; --gold-ink: #17120a; --gold-soft: rgba(241,184,45,.12);
+  --blue: #6b93f0; --blue-soft: rgba(107,147,240,.14); --grey: #9b988f; --ok: #55c287; --warn: #e8a23d; --fail: #ef6b60;
+  --code: #10100e; --shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+  --f-head: "Bahnschrift", "DIN Alternate", "Barlow Condensed", "Roboto Condensed", "Arial Narrow", sans-serif;
+  --f-body: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #efece3; --panel: #faf8f2; --panel-2: #f3f0e7; --raise: #ebe7dc; --ink: #15140f; --muted: #66625a; --faint: #9a958a;
+  --line: #dcd7ca; --line-2: #cbc5b6; --gold: #f1b82d; --gold-text: #8a6200; --gold-ink: #17120a; --gold-soft: rgba(241,184,45,.18);
+  --blue: #2f5bd3; --blue-soft: rgba(47,91,211,.1); --grey: #8a877f; --ok: #237a4b; --warn: #a96200; --fail: #b3261e;
+  --code: #f3f0e7; --shadow: none; color-scheme: light;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 13.5px/1.5 var(--f-body); -webkit-font-smoothing: antialiased; }
+body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50; opacity: .045;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+:root[data-theme="light"] body::after { opacity: .06; filter: invert(1); }
+a { color: var(--gold-text); }
+code { font: 12px var(--f-mono); background: var(--raise); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+select, input, button, textarea { font: inherit; color: var(--ink); }
+select, input[type=text], input[type=password] { background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 3px; padding: 6px 9px; }
+select:focus, input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+button, .btn { background: var(--raise); border: 1px solid var(--line-2); border-radius: 3px; padding: 6px 12px; cursor: pointer;
+  font: 600 11.5px var(--f-head); letter-spacing: .08em; text-transform: uppercase; color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+button:hover, .btn:hover { border-color: var(--faint); }
+button.primary, .btn.primary { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); }
+button.primary:hover { filter: brightness(1.08); }
+button.ghost { background: transparent; }
+button:disabled { opacity: .4; cursor: default; }
+
+/* frame */
+.top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 0 18px; min-height: 54px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 10px; margin-right: 8px; text-decoration: none; color: var(--ink); }
+.brand .mark { width: 30px; height: 30px; background: var(--gold); color: var(--gold-ink); display: grid; place-items: center; font: 700 13px var(--f-head); letter-spacing: .02em; border-radius: 2px; }
+.brand .name { font: 600 15px var(--f-head); letter-spacing: .14em; text-transform: uppercase; }
+.field { display: flex; align-items: center; gap: 8px; }
+.label { font: 600 10.5px var(--f-head); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.spacer { flex: 1; }
+.led { display: inline-flex; align-items: center; gap: 8px; font: 12px var(--f-mono); color: var(--muted); }
+.led i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 20%, transparent); }
+.led.running i { background: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); animation: pulse 1.6s ease-in-out infinite; }
+.led.paused i { background: var(--warn); } .led.finished i { background: var(--ok); } .led.error i { background: var(--fail); }
+@keyframes pulse { 50% { opacity: .35; } }
+.badge { font: 600 11px var(--f-mono); background: var(--gold-soft); color: var(--gold-text); border: 1px solid color-mix(in srgb, var(--gold) 40%, transparent); padding: 3px 8px; border-radius: 2px; }
+.layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: calc(100vh - 54px); }
+nav { border-right: 1px solid var(--line); padding: 18px 10px; background: var(--panel); }
+nav .label { padding: 0 10px 8px; display: block; }
+nav a { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; color: var(--muted); text-decoration: none; border-left: 2px solid transparent; font-size: 13px; }
+nav a .n { font: 11px var(--f-mono); color: var(--faint); width: 18px; }
+nav a:hover { color: var(--ink); background: var(--panel-2); }
+nav a.active { color: var(--ink); border-left-color: var(--gold); background: var(--panel-2); }
+nav a.active .n { color: var(--gold-text); }
+main { padding: 22px 28px 80px; max-width: 1440px; min-width: 0; }
+.page-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.eyebrow { font: 600 10.5px var(--f-head); letter-spacing: .18em; text-transform: uppercase; color: var(--gold-text); margin-bottom: 4px; }
+h2 { font: 600 26px/1.05 var(--f-head); letter-spacing: .04em; text-transform: uppercase; margin: 0; }
+h3 { font: 600 12.5px var(--f-head); letter-spacing: .12em; text-transform: uppercase; margin: 22px 0 10px; color: var(--ink); display: flex; align-items: center; gap: 10px; }
+h3 .sub { font: 400 12px var(--f-body); letter-spacing: 0; text-transform: none; color: var(--muted); }
+p.lead { color: var(--muted); max-width: 820px; margin: 0 0 14px; }
+
+/* panels */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 16px 18px; margin-bottom: 12px; box-shadow: var(--shadow); }
+.card > h3:first-child { margin-top: 0; }
+.card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.card-head h3 { margin: 0; }
+.card-head .actions { margin-left: auto; display: flex; gap: 6px; }
+.chip { font: 600 10.5px var(--f-mono); padding: 3px 8px; border-radius: 2px; background: var(--raise); color: var(--muted); border: 1px solid var(--line-2); text-transform: uppercase; letter-spacing: .04em; }
+.chip.done, .chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.chip.review, .chip.deciding, .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.chip.running, .chip.applying { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 40%, transparent); background: var(--blue-soft); }
+.chip.failed, .chip.fail { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 40%, transparent); background: color-mix(in srgb, var(--fail) 10%, transparent); }
+.notes { background: var(--gold-soft); border-left: 2px solid var(--gold); padding: 9px 12px; margin: 10px 0; }
+.callout { border: 1px solid var(--line-2); border-left: 3px solid var(--blue); background: var(--panel-2); padding: 10px 14px; margin: 0 0 14px; }
+.callout.warn { border-left-color: var(--warn); } .callout.ok { border-left-color: var(--ok); } .callout.fail { border-left-color: var(--fail); }
+.callout b { font-weight: 600; }
+textarea { width: 100%; min-height: 220px; background: var(--code); border: 1px solid var(--line-2); border-radius: 3px; padding: 10px; font: 12px/1.45 var(--f-mono); }
+pre { background: var(--code); border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px; overflow: auto; max-height: 340px; font: 11.5px/1.5 var(--f-mono); margin: 0; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.empty { color: var(--muted); padding: 40px 24px; text-align: center; border: 1px dashed var(--line-2); border-radius: 4px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.err { color: var(--fail); font-size: 13px; margin-top: 6px; }
+
+/* KPI tiles */
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 14px; }
+.kpi { background: var(--panel); padding: 14px 16px 12px; min-height: 96px; }
+.kpi .v { font: 600 30px/1.1 var(--f-head); letter-spacing: .01em; font-variant-numeric: tabular-nums; }
+.kpi .v small { font: 500 14px var(--f-head); color: var(--muted); margin-left: 4px; }
+.kpi .v.gold { color: var(--gold-text); }
+.kpi .k { margin-bottom: 6px; }
+.kpi .d { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* tables */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 3px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font: 600 10.5px var(--f-head); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); position: sticky; top: 0; }
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--panel-2); }
+td.num, th.num { text-align: right; font: 12px var(--f-mono); font-variant-numeric: tabular-nums; }
+td.num b { color: var(--gold-text); font-weight: 600; }
+td.bar { min-width: 120px; }
+.mini { height: 6px; background: var(--raise); position: relative; border-radius: 1px; }
+.mini span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--gold); border-radius: 1px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13px; }
+.kv > div:nth-child(odd) { font: 600 10.5px var(--f-head); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+.kv > div:nth-child(even) { font-family: var(--f-mono); font-size: 12.5px; }
+
+/* pipeline */
+.steps { display: grid; grid-auto-flow: column; gap: 3px; margin: 0 0 16px; }
+.steps div { height: 4px; background: var(--raise); }
+.steps .done { background: var(--ok); } .steps .running, .steps .applying, .steps .deciding { background: var(--blue); } .steps .failed { background: var(--fail); }
+.stage-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stage-num { font: 600 12px var(--f-mono); color: var(--gold-text); width: 26px; }
+.stage-title { font: 600 14px var(--f-head); letter-spacing: .06em; text-transform: uppercase; }
+.msg { color: var(--muted); margin: 6px 0 0 38px; font-size: 12.5px; }
+.details { margin: 12px 0 0 38px; }
+.banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 12px; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 3px; }
+.banner .phase { font: 600 16px var(--f-head); letter-spacing: .06em; text-transform: uppercase; }
+.banner.running { border-left-color: var(--blue); } .banner.paused { border-left-color: var(--warn); } .banner.finished { border-left-color: var(--ok); } .banner.error { border-left-color: var(--fail); }
+.issue { border-left: 2px solid var(--warn); padding: 7px 11px; margin: 6px 0; background: var(--panel-2); font-size: 12.5px; }
+.issue.fail { border-color: var(--fail); } .issue.info { border-color: var(--blue); }
+.issue b { text-transform: capitalize; }
+
+/* figures, images */
+.figs { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.figs figure { margin: 0; }
+.figs img, .grid img, img.fig { width: 100%; border: 1px solid var(--line); background: #fff; display: block; border-radius: 2px; }
+.figs figcaption { font: 11px var(--f-mono); color: var(--muted); margin-top: 4px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.pairs { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.pair { background: var(--panel-2); border: 1px solid var(--line); padding: 8px; border-radius: 3px; }
+.pair .imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.pair img { width: 100%; display: block; background: #fff; }
+.pair .cap { display: flex; justify-content: space-between; font: 11px var(--f-mono); color: var(--muted); margin-top: 6px; }
+
+/* charts */
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.chart { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 10px 10px 6px; min-width: 0; }
+.chart .t { font: 600 11.5px var(--f-head); letter-spacing: .08em; text-transform: uppercase; margin: 0 2px 2px; display: flex; justify-content: space-between; gap: 8px; }
+.chart .t span { font: 11px var(--f-mono); letter-spacing: 0; text-transform: none; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 11px var(--f-mono); color: var(--muted); margin: 4px 2px; }
+.legend i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; border-radius: 1px; }
+.legend i.line { height: 2px; vertical-align: 3px; } .legend i.dash { height: 0; border-top: 1.5px dashed var(--muted); vertical-align: 3px; background: none; }
+svg { display: block; overflow: visible; }
+svg text { fill: var(--muted); font: 10px var(--f-mono); }
+svg .grid-l { stroke: var(--line); }
+svg .axis { stroke: var(--line-2); }
+svg .ideal { stroke: var(--muted); stroke-dasharray: 4 3; stroke-width: 1; }
+svg [data-tip]:hover { stroke: var(--ink); stroke-width: 1.5; }
+#tip { position: fixed; z-index: 60; pointer-events: none; background: var(--raise); border: 1px solid var(--line-2); color: var(--ink); font: 11.5px/1.4 var(--f-mono); padding: 6px 9px; border-radius: 2px; white-space: pre; display: none; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+
+/* tabs, menus */
+.tabs { position: sticky; top: 54px; z-index: 10; display: flex; gap: 0; overflow-x: auto; background: var(--bg); border-bottom: 1px solid var(--line); margin: 0 0 18px; scrollbar-width: none; }
+.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 11px 14px 10px; color: var(--muted); white-space: nowrap; }
+.tabs button:hover { color: var(--ink); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--gold); }
+.tabs button .count { font: 10px var(--f-mono); color: var(--faint); margin-left: 4px; }
+.seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 3px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: var(--panel-2); color: var(--muted); }
+.seg button.on { background: var(--raise); color: var(--ink); box-shadow: inset 0 -2px 0 var(--gold); }
+details.menu { position: relative; }
+details.menu summary { list-style: none; }
+details.menu summary::-webkit-details-marker { display: none; }
+details.menu .items { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; background: var(--panel); border: 1px solid var(--line-2); border-radius: 3px; min-width: 290px; padding: 6px; box-shadow: 0 12px 30px rgba(0,0,0,.4); }
+details.menu .items a, details.menu .items button { display: flex; width: 100%; justify-content: space-between; background: none; border: 0; text-align: left; padding: 8px 10px; color: var(--ink); font: 13px var(--f-body); text-transform: none; letter-spacing: 0; text-decoration: none; border-radius: 2px; }
+details.menu .items a:hover, details.menu .items button:hover { background: var(--panel-2); }
+details.menu .items .k { font: 11px var(--f-mono); color: var(--muted); }
+details.menu .sep { height: 1px; background: var(--line); margin: 4px 0; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+
+form.card label.f, .card label.f { display: block; margin: 14px 0 5px; }
+.card select { max-width: 100%; }
+form.card input[type=text] { width: 100%; }
+progress { width: 100%; height: 6px; margin-top: 10px; accent-color: var(--gold); }
+.log { font: 11.5px/1.6 var(--f-mono); max-height: 560px; overflow: auto; }
+.log div { border-bottom: 1px solid var(--line); padding: 3px 0; }
+.log .t { color: var(--faint); } .log .error { color: var(--fail); } .log .warning { color: var(--warn); }
+dialog.modal { max-width: 780px; width: calc(100% - 32px); max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line-2); border-top: 3px solid var(--gold); border-radius: 4px; padding: 20px 22px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+dialog.modal::backdrop { background: rgba(0,0,0,.6); }
+dialog.modal h2 { font: 600 20px var(--f-head); letter-spacing: .04em; margin: 0 0 4px; }
+dialog.modal .tablewrap { overflow-x: auto; margin: 12px 0 8px; }
+dialog.modal td { white-space: normal; vertical-align: top; }
+dialog.modal td .hint { margin-top: 2px; font-size: 11.5px; }
+dialog.modal .chip { white-space: nowrap; }
+dialog.modal .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 18px; }
+.train-card ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+@media (prefers-reduced-motion: reduce) { .led.running i { animation: none; } }
+@media (max-width: 820px) {
+  .layout { grid-template-columns: 1fr; }
+  nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 6px; }
+  nav .label { display: none; } nav a { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; } nav a.active { border-bottom-color: var(--gold); }
+  main { padding: 16px; } .msg, .details { margin-left: 0; } .tabs { top: 0; } .top { position: static; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#pipeline"><span class="mark">D2D</span><span class="name">DNA to Display</span></a>
+  <div class="field"><span class="label">Dataset</span><select id="dataset" aria-label="Dataset"></select></div>
+  <span id="led" class="led"></span>
+  <span id="tasks" class="badge" hidden></span>
+  <span class="spacer"></span>
+  <button class="ghost" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme">◐</button>
+  <a href="#new" class="btn primary">+ Add dataset</a>
+</header>
+<div class="layout">
+  <nav id="nav"></nav>
+  <main id="main"><div class="empty">Loading…</div></main>
+</div>
+<div id="tip"></div>
+<dialog id="trainDlg" class="modal" aria-labelledby="trainDlgTitle"></dialog>
+<script>
+const PAGES = [['pipeline', 'Pipeline'], ['data', 'Images & traits'], ['genetics', 'Genetics'],
+               ['training', 'Training'], ['results', 'Results'], ['generate', 'Generate dataset'], ['activity', 'Activity & usage'], ['settings', 'Settings']];
+const BACKEND_HELP = {rules: 'Rules only (no AI, free)', api: 'Claude API (needs an API key)', 'claude-code': 'Claude Code (your Claude subscription)'};
+let meta = null, page = 'pipeline', ds = null, open = {}, timer = null;
+let resTab = 'overview', resRole = 'validation', unitsMode = {}, resCache = null;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fin = v => typeof v === 'number' && Number.isFinite(v);
+const fmt = (v, d = 3) => {
+  if (v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))) return '—';
+  if (typeof v !== 'number') return esc(v);
+  if (Number.isInteger(v)) return v.toLocaleString();
+  if (v !== 0 && Math.abs(v) < 1e-3) return v.toExponential(1);
+  return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(d);
+};
+const pct = (v, d = 1) => fin(v) ? (v * 100).toFixed(d) + '%' : '—';
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { const t = await r.text(); throw new Error(t); }
+  return r.json();
+}
+const post = (path, body) => api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+
+// theme
+function setTheme(t) { document.documentElement.dataset.theme = t; try { localStorage.setItem('d2d-theme', t); } catch (e) {} }
+try { setTheme(localStorage.getItem('d2d-theme') || 'dark'); } catch (e) { setTheme('dark'); }
+$('#theme').onclick = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+// tooltips: any element with data-tip
+const tip = $('#tip');
+document.addEventListener('mouseover', e => { const t = e.target.closest('[data-tip]'); if (!t) { tip.style.display = 'none'; return; } tip.textContent = t.dataset.tip; tip.style.display = 'block'; });
+document.addEventListener('mousemove', e => { if (tip.style.display !== 'block') return;
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px'; });
+
+function navHtml() {
+  $('#nav').innerHTML = '<span class="label">Workspace</span>' + PAGES.map(([k, l], i) =>
+    `<a href="#${k}" class="${k === page ? 'active' : ''}"><span class="n">${String(i + 1).padStart(2, '0')}</span>${l}</a>`).join('');
+}
+function ledHtml() {
+  const d = meta && meta.datasets.find(x => x.name === ds);
+  const ap = (d && d.autopilot) || {};
+  const cls = ap.phase === 'finished' ? 'finished' : ap.phase === 'error' ? 'error' : ap.paused ? 'paused' : ap.enabled ? 'running' : '';
+  const txt = ap.phase === 'finished' ? 'finished' : ap.paused ? 'paused' : ap.enabled ? (meta.titles[ap.phase] || 'running').toLowerCase() : 'idle';
+  $('#led').className = 'led ' + cls; $('#led').innerHTML = d ? `<i></i>${esc(txt)}` : '';
+}
+async function init() {
+  meta = await api('/api/datasets');
+  // Links can name the dataset (?ds=name) and a results tab (#results:traits).
+  const want = new URLSearchParams(location.search).get('ds');
+  fillDatasets(meta.datasets.some(d => d.name === want) ? want : undefined);
+  $('#dataset').onchange = () => { ds = $('#dataset').value; resCache = null; if (page === 'new') location.hash = 'pipeline'; render(); };
+  const fromHash = () => { const [p, tab] = location.hash.slice(1).split(':'); if (tab) resTab = tab; return p; };
+  window.onhashchange = () => { page = fromHash() || 'pipeline'; render(); };
+  page = fromHash() || (meta.datasets.length ? 'pipeline' : 'new');
+  render();
+  timer = setInterval(refresh, 4000);
+}
+function fillDatasets(select) {
+  $('#dataset').innerHTML = meta.datasets.map(d => `<option>${esc(d.name)}</option>`).join('');
+  ds = select || ds || (meta.datasets.length ? meta.datasets[0].name : null);
+  if (ds) $('#dataset').value = ds;
+}
+async function refresh() {
+  try {
+    meta = await api('/api/datasets');
+    const t = $('#tasks');
+    t.hidden = !meta.pending_tasks;
+    t.textContent = `${meta.pending_tasks} waiting for /d2d`;
+    ledHtml();
+    if (['pipeline', 'activity', 'training'].includes(page) || (page === 'generate' && genBusy)) render(true);
+  } catch (e) {}
+}
+const head = (eyebrow, title, right = '') => `<div class="page-head"><div><div class="eyebrow">${esc(eyebrow)}</div><h2>${title}</h2></div><span class="spacer"></span>${right}</div>`;
+
+async function render(quiet) {
+  navHtml(); ledHtml();
+  const m = $('#main');
+  if (page === 'new') return pageNew(m);
+  if (page === 'settings') return pageSettings(m);
+  if (!ds) { m.innerHTML = '<div class="empty">No datasets yet. Click <b>Add dataset</b>, or run <code>python -m d2d demo</code>.</div>'; return; }
+  try {
+    if (page === 'pipeline') await pagePipeline(m, quiet);
+    else if (page === 'data') await pageData(m);
+    else if (page === 'genetics') await pageGenetics(m);
+    else if (page === 'training') await pageTraining(m);
+    else if (page === 'results') await pageResults(m);
+    else if (page === 'generate') await pageGenerate(m, quiet);
+    else await pageActivity(m);
+  } catch (e) { m.innerHTML = `<div class="callout fail">Error: ${esc(e.message)}</div>`; }
+}
+
+// --- Pipeline --------------------------------------------------------------------
+async function pagePipeline(m, quiet) {
+  const d = await api(`/api/ds/${ds}`);
+  if (quiet && document.activeElement && document.activeElement.tagName === 'TEXTAREA') return;
+  const details = {};
+  for (const s of meta.stages) if (open[s]) details[s] = await api(`/api/ds/${ds}/stage/${s}`);
+  const ap = d.autopilot || {};
+  const paused = !!ap.paused;
+  // Where to train, shown once the settings exist and until training runs here or on the cluster.
+  const showTrain = ap.phase !== 'finished' && (d.state.training || {}).status === 'done'
+    && !['local', 'cluster'].includes(ap.training_mode) && !(d.config.training || {}).allow_local_training;
+  const bundle = showTrain ? await api(`/api/ds/${ds}/bundle`) : null;
+  const cls = ap.phase === 'finished' ? 'finished' : ap.phase === 'error' ? 'error' : paused ? 'paused' : ap.enabled ? 'running' : '';
+  const phaseText = ap.phase === 'finished' ? 'Finished' : paused ? 'Paused'
+    : ap.enabled ? 'Running · ' + (ap.phase === 'training' && (d.state.training || {}).status === 'done' ? 'training the models'
+      : esc(meta.titles[ap.phase] || 'starting')) : 'Not started';
+  m.innerHTML = head('Pipeline', esc(ds)) + `
+    <div class="banner ${cls}"><span class="led ${cls}"><i></i></span><div><div class="phase">${phaseText}</div>
+      <div class="hint" style="margin:0">${esc(ap.message || '')}</div></div><span class="spacer"></span>
+      <a class="chip" href="#settings" style="text-decoration:none">agent · ${esc(BACKEND_HELP[meta.backend] || meta.backend)}</a>
+      ${ap.phase === 'finished' ? '' : paused || !ap.enabled
+        ? `<button class="primary" onclick="apCall('resume')">${ap.enabled ? 'Resume' : 'Start'}</button>`
+        : `<button onclick="apCall('pause')">Pause</button>`}</div>
+    <div class="steps">${meta.stages.map(s => `<div class="${(d.state[s] || {}).status}" title="${esc(meta.titles[s])}"></div>`).join('')}</div>
+    ${showTrain ? trainingCard(d, bundle) : ''}
+    ${meta.stages.map((s, i) => {
+      const st = d.state[s] || {status: 'pending'};
+      return `<div class="card">
+        <div class="stage-head"><div class="stage-num">${String(i + 1).padStart(2, '0')}</div><div class="stage-title">${esc(meta.titles[s])}</div>
+          <span class="chip ${st.status}">${st.status}${st.decision_source && st.status === 'done' ? ' · ' + esc(st.decision_source) : ''}</span>
+          <div class="row" style="margin-left:auto"><button class="ghost" onclick="toggle('${s}')">${open[s] ? 'Hide' : 'Details'}</button>
+          ${paused && st.status !== 'pending' ? `<button onclick="redo('${s}')">Redo from here</button>` : ''}</div></div>
+        ${st.message ? `<div class="msg">${esc(st.message)}</div>` : ''}
+        ${open[s] ? stageDetails(s, details[s], paused) : ''}</div>`;
+    }).join('')}`;
+}
+function stageDetails(s, x, paused) {
+  if (!x) return '';
+  const dec = x.decision;
+  const figs = x.figures.length ? `<h3>Figures</h3><div class="figs">${x.figures.map(f =>
+    `<figure><a href="${f.url}" target="_blank"><img loading="lazy" src="${f.url}?t=${Date.now() >> 14}" alt="${esc(f.name)}"></a><figcaption>${esc(f.name)}</figcaption></figure>`).join('')}</div>` : '';
+  const task = x.task && x.task.status === 'pending' ? `<div class="notes">Waiting for Claude Code: open Claude Code in the <code>d2d</code> folder and run <code>/d2d</code>. The pipeline continues by itself once it answers.</div>` : '';
+  return `<div class="details">${task}
+    ${dec && dec.notes ? `<div class="notes">${esc(dec.notes)}</div>` : ''}
+    ${dec ? (paused
+      ? `<h3>Decision <span class="chip">edit, then redo from here</span></h3><textarea id="dec-${s}">${esc(JSON.stringify(dec, null, 2))}</textarea>
+         <div class="row" style="margin-top:8px"><button class="primary" onclick="redo('${s}', true)">Apply edit and redo from here</button></div>`
+      : `<h3>Decision</h3><pre>${esc(JSON.stringify(dec, null, 1))}</pre><div class="hint">Pause the pipeline to change a decision.</div>`) : ''}
+    ${x.result ? `<h3>Result</h3><pre>${esc(JSON.stringify(x.result, null, 1))}</pre>` : ''}
+    ${figs}
+    ${x.report ? `<h3>Report</h3><pre>${esc(JSON.stringify(trimReport(x.report), null, 1))}</pre>` : ''}</div>`;
+}
+function trimReport(r) { const o = {}; for (const [k, v] of Object.entries(r)) if (!k.startsWith('_')) o[k] = v; return o; }
+async function toggle(s) { open[s] = !open[s]; render(); }
+async function apCall(what) { try { await post(`/api/ds/${ds}/${what}`); render(); } catch (e) { alert(e.message); } }
+async function redo(s, withEdit) {
+  let body = {};
+  if (withEdit) { try { body.decision = JSON.parse($(`#dec-${s}`).value); } catch (e) { alert('Not valid JSON: ' + e.message); return; } }
+  try { await post(`/api/ds/${ds}/stage/${s}/rerun`, body); render(); } catch (e) { alert(e.message); }
+}
+
+// --- Add dataset ----------------------------------------------------------------------
+async function pageNew(m) {
+  m.innerHTML = head('New run', 'Add a dataset') + `
+  <form class="card" id="newForm" onsubmit="submitNew(event)" style="max-width:860px">
+    <label class="f label" for="nName">Name</label><input type="text" id="nName" placeholder="e.g. maize_roots_2027" autocomplete="off">
+    <div class="hint">Letters, digits, - and _.</div>
+    <label class="f label">Data</label>
+    <div class="row"><input type="file" id="nFolder" webkitdirectory multiple><span class="hint">a folder</span></div>
+    <div class="row" style="margin-top:6px"><input type="file" id="nZip" accept=".zip"><span class="hint">or one .zip</span></div>
+    <div class="row" style="margin-top:6px"><input type="text" id="nPath" placeholder="or a folder path on this computer (best for large datasets)"></div>
+    <div class="hint">Images plus a genotype file (0/1/2 table, VCF or HapMap), and any trait table. The agents work out the rest.</div>
+    <label class="f label">Training</label>
+    <div class="hint" style="margin-top:0">When you start, d2d checks this computer against what training needs and asks whether to train here or export a bundle to train elsewhere.</div>
+    <div style="margin-top:16px" class="row"><button class="primary" type="submit" id="nGo">Upload and start</button><span id="nStatus" class="hint"></span></div>
+    <progress id="nProg" value="0" max="1" hidden></progress><div id="nErr" class="err"></div>
+  </form>`;
+}
+async function submitNew(ev) {
+  ev.preventDefault();
+  const name = $('#nName').value.trim(), err = $('#nErr'), go = $('#nGo');
+  err.textContent = '';
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) { err.textContent = 'Enter a name: letters, digits, - and _ only.'; return; }
+  const files = [...$('#nFolder').files, ...$('#nZip').files], path = $('#nPath').value.trim();
+  if (!files.length && !path) { err.textContent = 'Choose a folder or a zip, or give a folder path.'; return; }
+  let where = 'later', pref = 'ask';
+  try { pref = (await api('/api/settings')).training_where; } catch (e) {}
+  if (pref !== 'ask') where = pref;
+  else {
+    where = await askWhereToTrain({bytes: files.reduce((a, f) => a + f.size, 0), source: files.length ? '' : path});
+    if (!where || where === 'cancel') return;
+  }
+  go.disabled = true;
+  try {
+    if (files.length) {
+      const prog = $('#nProg'); prog.hidden = false; prog.max = files.length;
+      for (const [i, f] of files.entries()) {
+        const rel = f.webkitRelativePath || f.name;
+        $('#nStatus').textContent = `uploading ${i + 1} of ${files.length}: ${rel}`;
+        const r = await fetch(`/api/upload/${encodeURIComponent(name)}?path=${encodeURIComponent(rel)}`, {method: 'PUT', body: f});
+        if (!r.ok) throw new Error(await r.text());
+        prog.value = i + 1;
+      }
+    }
+    $('#nStatus').textContent = 'starting the pipeline';
+    await post('/api/datasets', {name, uploaded: !!files.length, source: path, where});
+    meta = await api('/api/datasets'); fillDatasets(name); location.hash = 'pipeline';
+  } catch (e) { err.textContent = e.message; go.disabled = false; }
+}
+
+// --- Where to train: this computer, or a bundle for another machine ----------------------
+const SPEC_LABEL = {gpu_memory_gb: 'GPU memory', ram_gb: 'System memory', cpu_cores: 'CPU cores', disk_free_gb: 'Free disk', power: 'Power and cooling'};
+const SPEC_LEVEL = {ok: ['ok', 'meets'], min: ['warn', 'minimum only'], fail: ['fail', 'below minimum'], unknown: ['', 'unknown']};
+const VERDICT = {
+  ready: ['ok', 'This computer meets the recommended specs.'],
+  possible: ['warn', 'This computer meets the minimum but not the recommendation. Training works, more slowly, and the image model may run at a smaller batch.'],
+  not_recommended: ['fail', 'Not recommended: this computer is below the minimum for training. Train elsewhere, or start here anyway.']};
+// Resolves to 'local', 'export', 'later' (import only), 'cancel' or null (Esc).
+async function askWhereToTrain({bytes = 0, source = '', later = true} = {}) {
+  const dlg = $('#trainDlg');
+  dlg.innerHTML = '<h2 id="trainDlgTitle">Start training on this computer?</h2><div class="hint">Checking this computer…</div>';
+  dlg.showModal();
+  let c;
+  try { c = await api(`/api/system?bytes=${bytes}&source=${encodeURIComponent(source)}`); }
+  catch (e) { c = {verdict: 'not_recommended', rows: [], time_note: 'Could not read this computer: ' + e.message}; }
+  const amt = (v, u) => typeof v === 'string' ? esc(v) : fin(v) ? `${fmt(v, 1)} ${esc(u)}` : '—';
+  const v = VERDICT[c.verdict], ready = c.verdict === 'ready';
+  dlg.innerHTML = `<h2 id="trainDlgTitle">Start training on this computer?</h2>
+    <div class="hint" style="margin:0 0 12px">After the data is prepared, the pipeline trains two models: an image model, then the DNA-to-image model. Together they keep the GPU at full load for a day or more.</div>
+    <div class="callout ${v[0]}" role="status"><b>${v[1]}</b></div>
+    ${c.rows.length ? `<div class="tablewrap"><table><thead><tr><th>Requirement</th><th>Minimum</th><th>Recommended</th><th>This computer</th><th></th></tr></thead><tbody>
+      ${c.rows.map(r => `<tr><td><b>${SPEC_LABEL[r.key] || esc(r.key)}</b><div class="hint">${esc(r.why)}</div></td>
+        <td>${amt(r.minimum, r.unit)}</td><td>${amt(r.recommended, r.unit)}</td><td>${r.have_text ? esc(r.have_text) : amt(r.have, r.unit)}</td>
+        <td><span class="chip ${SPEC_LEVEL[r.level][0]}">${SPEC_LEVEL[r.level][1]}</span></td></tr>`).join('')}</tbody></table></div>` : ''}
+    <div class="hint">${esc(c.time_note)}${c.dataset_gb ? ` This dataset: ${fmt(c.dataset_gb, 2)} GB.` : ''}</div>
+    <div class="hint"><b>Train elsewhere</b> builds a bundle with the code, this dataset and step-by-step directions for a workstation or cluster. When it finishes there, you import its results here and the pipeline carries on.</div>
+    <div class="actions">
+      <button class="ghost" value="${later ? 'later' : 'cancel'}">${later ? 'Decide later' : 'Cancel'}</button>
+      <button value="export" class="${ready ? '' : 'primary'}"${ready ? '' : ' autofocus'}>Train elsewhere (export)</button>
+      <button value="local" class="${ready ? 'primary' : ''}"${ready ? ' autofocus' : ''}>${c.verdict === 'not_recommended' ? 'Train here anyway' : 'Train on this computer'}</button>
+    </div>`;
+  dlg.querySelector('[autofocus]').focus();
+  return new Promise(res => {
+    dlg.querySelectorAll('.actions button').forEach(b => b.onclick = () => { dlg.close(); res(b.value); });
+    dlg.oncancel = () => res(null);
+  });
+}
+let importMsg = '';
+function trainingCard(d, b) {
+  const tr = d.config.training || {}, n = esc(ds);
+  const bundle = !b ? '' : b.state === 'building' ? `<span class="chip running">building bundle ${b.total ? `${b.done} / ${b.total} files` : ''}</span>`
+    : b.state === 'ready' ? `<a class="btn primary" href="/api/ds/${n}/bundle/download">↓ Download bundle (${fmt(b.size_gb, 2)} GB)</a><button class="ghost" onclick="buildBundle()">Rebuild</button>`
+    : `<button class="${tr.where === 'export' ? 'primary' : ''}" onclick="buildBundle()" ${b.ready_to_build ? '' : 'disabled title="after the training stage"'}>Build training bundle</button>`
+      + (b.state === 'failed' ? `<span class="err">${esc(b.message)}</span>` : '');
+  return `<div class="card train-card"><h3>Training <span class="sub">${tr.where === 'export' ? 'on another machine' : 'choose where to train'}</span></h3>
+    <div class="row"><button onclick="trainHere()">Train on this computer…</button>${bundle}
+      <a class="btn ghost" href="/api/ds/${n}/bundle/directions" target="_blank">Directions</a>
+      <label class="btn ghost">Import results (.zip)<input type="file" accept=".zip" hidden onchange="importResults(this)"></label></div>
+    <ol><li>Download the bundle and unzip it on the training machine.</li>
+      <li>Follow its <code>RUN_TRAINING.md</code>: <code>python -m d2d.train ${n} check</code>, then <code>python -m d2d.train ${n}</code>.</li>
+      <li>Import the <code>d2d_results_${n}.zip</code> it writes. The pipeline checks the runs and scores the images by itself.</li></ol>
+    ${importMsg ? `<div class="hint">${esc(importMsg)}</div>` : ''}</div>`;
+}
+async function trainHere() {
+  const w = await askWhereToTrain({later: false});
+  try {
+    if (w === 'local') await post(`/api/ds/${ds}/training/where`, {where: 'local'});
+    else if (w === 'export') { await post(`/api/ds/${ds}/training/where`, {where: 'export'}); await buildBundle(); return; }
+  } catch (e) { alert(e.message); }
+  render();
+}
+async function buildBundle() {
+  try { await post(`/api/ds/${ds}/bundle`); } catch (e) { alert(e.message); }
+  render();
+}
+async function importResults(input) {
+  const f = input.files[0];
+  if (!f) return;
+  importMsg = `uploading ${f.name} (${fmt(f.size / 1e9, 2)} GB)…`; render(true);
+  try {
+    const r = await api(`/api/ds/${ds}/import-results`, {method: 'PUT', body: f});
+    importMsg = `imported ${r.imported} files${r.ignored ? `, ignored ${r.ignored} that were not ${ds} runs` : ''}. The pipeline picks them up within a few seconds.`;
+  } catch (e) { importMsg = 'import failed: ' + e.message; }
+  render();
+}
+
+// --- Settings ----------------------------------------------------------------------------
+const WHERE_HELP = [['ask', "Ask, with this computer's specs (recommended)"], ['local', 'Always train on this computer'], ['export', 'Always export a bundle to train elsewhere']];
+let setMsg = {};
+async function pageSettings(m) {
+  const s = await api('/api/settings');
+  const k = s.api_key, cc = s.claude_code;
+  const msg = key => setMsg[key] ? `<div class="hint ${setMsg[key].ok === false ? 'err' : ''}" role="status">${esc(setMsg[key].text)}</div>` : '';
+  const opts = (list, cur, label) => list.map(b => `<option value="${b}"${cur === b ? ' selected' : ''}>${esc(label(b))}</option>`).join('');
+  m.innerHTML = head('App', 'Settings') + `
+  <div class="two" style="align-items:start">
+  <div>
+    <div class="card"><h3>Agent <span class="sub">who makes the pipeline's decisions</span></h3>
+      <label class="f label" for="sBackend">Agent for every dataset</label>
+      <select id="sBackend" onchange="saveSetting({backend: this.value}, 'agent')">${opts(s.backends, s.backend, b => BACKEND_HELP[b])}</select>
+      <div class="hint">Takes effect from the next stage the pipeline runs.</div>
+      ${msg('agent')}
+      <label class="f label">Model</label>
+      <div class="row"><span class="chip ok">${esc(s.model_label)}</span><span class="hint" style="margin:0">fixed: every decision uses the same model, so results never depend on a model choice</span></div>
+      <div class="hint" style="margin-top:12px"><b>Rules only</b> uses no AI: every stage has a rule-based answer. <b>Claude API</b> runs unattended and is billed to an API key. <b>Claude subscription</b> uses your Claude Pro or Max plan through Claude Code, with no API credits.</div>
+    </div>
+    <div class="card"><h3>Claude API</h3>
+      <div class="row" style="margin-bottom:6px">${k.set ? `<span class="chip ok">key set ${esc(k.hint)}</span><span class="hint" style="margin:0">${k.source === 'environment' ? 'from ANTHROPIC_API_KEY in the environment' : 'saved on this computer'}</span>` : '<span class="chip">no key</span>'}</div>
+      <label class="f label" for="sKey">API key</label>
+      <div class="row"><input type="password" id="sKey" placeholder="sk-ant-…" autocomplete="off" style="flex:1;min-width:200px">
+        <button class="primary" onclick="saveKey()">Save key</button>
+        ${k.set && k.source === 'saved' ? '<button class="ghost" onclick="removeKey()">Remove</button>' : ''}
+        <button onclick="testKey()" ${k.set ? '' : 'disabled'}>Test</button></div>
+      <div class="hint">Stored in <code>${esc(k.stored_at)}</code>, outside the workspace, so bundles and exports never include it. Keys come from console.anthropic.com.</div>
+      ${msg('key')}
+    </div>
+  </div>
+  <div>
+    <div class="card"><h3>Claude subscription <span class="sub">through Claude Code</span></h3>
+      <div class="row" style="margin-bottom:6px">${cc.found ? `<span class="chip ok">Claude Code found</span><span class="hint" style="margin:0">${esc(cc.version || '')}</span>` : '<span class="chip warn">Claude Code not found</span>'}</div>
+      <div class="hint">Anthropic does not allow other apps to sign in to claude.ai for you, so d2d never handles your login. It leaves each question as a task, and Claude Code, signed in with your plan, answers it with <code>/d2d</code>.</div>
+      <div class="row" style="margin-top:12px"><input type="checkbox" id="sAuto" ${s.claude_code_auto ? 'checked' : ''} ${cc.found ? '' : 'disabled'} onchange="saveSetting({claude_code_auto: this.checked}, 'cc')">
+        <label for="sAuto">Answer automatically</label></div>
+      <div class="hint">When a decision is waiting, d2d runs <code>claude -p /d2d</code> in the <code>d2d</code> folder by itself. Claude Code may only read and write files and run the d2d commands. Off: open Claude Code in the <code>d2d</code> folder and run <code>/d2d</code> yourself when the pipeline asks.</div>
+      <label class="f label" for="sClaude">Claude Code command</label>
+      <div class="row"><input type="text" id="sClaude" value="${esc(s.claude_path)}" placeholder="${esc(cc.path || 'claude')}" style="flex:1"><button onclick="saveSetting({claude_path: $('#sClaude').value}, 'cc')">Save</button></div>
+      <div class="hint">Only needed if Claude Code is installed somewhere d2d cannot find.</div>
+      ${msg('cc')}
+    </div>
+    <div class="card"><h3>Training</h3>
+      <label class="f label" for="sWhere">When a dataset is imported</label>
+      <select id="sWhere" onchange="saveSetting({training_where: this.value}, 'train')">${WHERE_HELP.map(([v, l]) => `<option value="${v}"${s.training_where === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <div class="hint">Asking shows this computer's specs against what training needs, then trains here or builds a bundle with step-by-step directions to train on another machine or a cluster.</div>
+      ${msg('train')}
+    </div>
+    <div class="card"><h3>This installation</h3>
+      <div class="hint" style="margin-top:0">Workspace: <code>${esc(s.workspace)}</code><br>Settings file: <code>${esc(s.settings_file)}</code></div>
+    </div>
+  </div></div>`;
+}
+async function putSettings(path, body) {
+  return api(path, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+}
+async function saveSetting(body, key) {
+  try { await putSettings('/api/settings', body); setMsg[key] = {text: 'saved'}; }
+  catch (e) { setMsg[key] = {ok: false, text: e.message}; }
+  render();
+}
+async function saveKey() {
+  const key = $('#sKey').value.trim();
+  if (!key) { setMsg.key = {ok: false, text: 'paste a key first'}; return render(); }
+  try { await putSettings('/api/settings/api-key', {key}); setMsg.key = {text: 'key saved; press Test to check it'}; }
+  catch (e) { setMsg.key = {ok: false, text: e.message}; }
+  render();
+}
+async function removeKey() {
+  try { await putSettings('/api/settings/api-key', {key: ''}); setMsg.key = {text: 'key removed'}; }
+  catch (e) { setMsg.key = {ok: false, text: e.message}; }
+  render();
+}
+async function testKey() {
+  setMsg.key = {text: 'testing…'}; render();
+  try { const r = await post('/api/settings/test-api'); setMsg.key = {ok: r.ok, text: r.message}; }
+  catch (e) { setMsg.key = {ok: false, text: e.message}; }
+  render();
+}
+
+// --- tables and export -------------------------------------------------------------------
+// cols: [key, label, kind] where kind is 'num'|'r'|'pct'|'text'|'bar'
+let tables = {};
+function table(id, rows, cols, opts = {}) {
+  tables[id] = {rows, cols, name: opts.name || id};
+  if (!rows || !rows.length) return '<div class="empty">Nothing to show.</div>';
+  const cell = (r, [k, , kind, d]) => {
+    const v = r[k];
+    if (kind === 'text' || kind === undefined) return `<td>${esc(v)}</td>`;
+    if (kind === 'pct') return `<td class="num">${pct(v)}</td>`;
+    if (kind === 'r') return `<td class="num">${fin(v) ? (opts.bold === k ? `<b>${v.toFixed(2)}</b>` : v.toFixed(2)) : '—'}</td>`;
+    if (kind === 'bar') return `<td class="bar"><div class="mini" data-tip="${esc(k)}: ${fmt(v, 3)}"><span style="width:${Math.max(0, Math.min(1, v || 0)) * 100}%"></span></div></td>`;
+    return `<td class="num">${fmt(v, d ?? 3)}</td>`;
+  };
+  return `<div class="table-wrap"><table><thead><tr>${cols.map(([, l, kind]) => `<th class="${kind && kind !== 'text' && kind !== 'bar' ? 'num' : ''}">${esc(l)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${cols.map(c => cell(r, c)).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+function csvOf(rows, cols) {
+  const keys = cols ? cols.map(c => c[0]).filter((k, i) => cols[i][2] !== 'bar') : Object.keys(rows[0] || {});
+  const q = v => { if (v === null || v === undefined) return ''; const s = typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  return [keys.join(','), ...rows.map(r => keys.map(k => q(r[k])).join(','))].join('\n');
+}
+function download(name, text, type = 'text/csv') {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], {type})); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function exportTable(id) { const t = tables[id]; if (t) download(`${ds}_${resRole}_${t.name}.csv`, csvOf(t.rows, t.cols)); }
+const csvBtn = id => `<button class="ghost" onclick="exportTable('${id}')" title="Download this table as CSV">↓ CSV</button>`;
+
+// --- charts --------------------------------------------------------------------------------
+const C = {gen: 'var(--gold)', gp: 'var(--grey)', real: 'var(--blue)', a: 'var(--gold)', b: 'var(--blue)', c: 'var(--grey)', d: 'var(--ok)'};
+function niceTicks(lo, hi, n = 4) {
+  const span = hi - lo || 1, step0 = span / n, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n + 0.5) || mag * 10;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9 * span; v += step) out.push(+v.toPrecision(12));
+  return out;
+}
+const tickFmt = v => Math.abs(v) >= 10000 ? (v / 1000).toFixed(0) + 'k' : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? +v.toFixed(2) + '' : +v.toPrecision(2) + '';
+function lineChart(title, x, series, opts = {}) {
+  const W = 380, H = 190, L = 48, R = 10, T = 8, B = 24;
+  const ys = series.flatMap(s => s.y.filter(v => fin(v) && (!opts.log || v > 0)));
+  if (!ys.length) return '';
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (opts.zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (opts.log) { lo = Math.log10(lo); hi = Math.log10(hi); }
+  if (hi === lo) { hi += 1e-9; lo -= 1e-9; }
+  const xs = x.filter(fin), x0 = Math.min(...xs), x1 = Math.max(...xs) || 1;
+  const px = v => L + (v - x0) / Math.max(x1 - x0, 1e-9) * (W - L - R);
+  const py = v => { const u = opts.log ? Math.log10(v) : v; return T + (1 - (u - lo) / (hi - lo)) * (H - T - B); };
+  const paths = series.map((s, i) => {
+    let d = '', pen = false;
+    s.y.forEach((v, j) => { if (!fin(v) || (opts.log && v <= 0)) { pen = false; return; }
+      d += `${pen ? 'L' : 'M'}${px(x[j]).toFixed(1)},${py(v).toFixed(1)}`; pen = true; });
+    return `<path d="${d}" fill="none" stroke="${s.color || Object.values(C)[i + 3]}" stroke-width="1.6" ${s.dash ? 'stroke-dasharray="4 3"' : ''}/>`;
+  }).join('');
+  const ticks = [0, 0.5, 1].map(f => { const u = lo + f * (hi - lo); const v = opts.log ? 10 ** u : u;
+    return `<text x="${L - 5}" y="${py(v) + 3}" text-anchor="end">${fmt(v, Math.abs(v) < 0.01 ? 5 : 3)}</text><line class="grid-l" x1="${L}" x2="${W - R}" y1="${py(v)}" y2="${py(v)}"/>`; }).join('');
+  const zero = opts.zero ? `<line x1="${L}" x2="${W - R}" y1="${py(0)}" y2="${py(0)}" class="axis"/>` : '';
+  return `<div class="chart"><div class="t">${esc(title)}</div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(title)}">${ticks}${zero}
+    <text x="${W - R}" y="${H - 6}" text-anchor="end">${esc(opts.xlabel || 'epoch')} ${x1}</text><text x="${L}" y="${H - 6}">${x0}</text>${paths}</svg>
+    <div class="legend">${series.map((s, i) => `<span><i class="line" style="background:${s.color || Object.values(C)[i + 3]}"></i>${esc(s.name)}</span>`).join('')}</div></div>`;
+}
+// Truth vs prediction on equal axes, so the dashed y = x line is where perfect predictions fall.
+function scatterChart(pts, trait, raw, label) {
+  let p = pts.filter(q => q.trait === trait && fin(q.truth));
+  if (!p.length) return '';
+  const z = k => { const v = p.map(q => q[k]).filter(fin); const m = v.reduce((a, b) => a + b, 0) / v.length;
+    const s = Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / (v.length - 1)) || 1; return q => fin(q[k]) ? (q[k] - m) / s : NaN; };
+  const tx = raw ? (q => q.truth) : z('truth'), tg = raw ? (q => q.generated_mean) : z('generated_mean'), tb = raw ? (q => q.genomic_prediction) : z('genomic_prediction');
+  const all = p.flatMap(q => [tx(q), tg(q), tb(q)]).filter(fin);
+  let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.04 || 1; lo -= pad; hi += pad;
+  const S = 300, L = 44, B = 30, T = 8, R = 8, P = S - L - R;
+  const sx = v => L + (v - lo) / (hi - lo) * P, sy = v => T + (1 - (v - lo) / (hi - lo)) * P;
+  const ticks = niceTicks(lo, hi, 4);
+  const grid = ticks.map(t => `<line class="grid-l" x1="${sx(t)}" x2="${sx(t)}" y1="${T}" y2="${T + P}"/><line class="grid-l" x1="${L}" x2="${L + P}" y1="${sy(t)}" y2="${sy(t)}"/>
+    <text x="${sx(t)}" y="${T + P + 13}" text-anchor="middle">${tickFmt(t)}</text><text x="${L - 5}" y="${sy(t) + 3}" text-anchor="end">${tickFmt(t)}</text>`).join('');
+  const dots = (f, col, r, name) => p.filter(q => fin(f(q))).map(q => `<circle cx="${sx(tx(q)).toFixed(1)}" cy="${sy(f(q)).toFixed(1)}" r="${r}" fill="${col}" fill-opacity=".72" stroke="var(--panel)" stroke-width=".6"
+    data-tip="${esc(q.line)}\ntruth      ${fmt(q.truth)}\n${name.padEnd(10)} ${fmt(name === 'generated' ? q.generated_mean : q.genomic_prediction)}"/>`).join('');
+  return `<svg viewBox="0 0 ${S} ${S - R + B - 8}" width="100%" role="img" aria-label="${esc(label)} scatter">
+    <rect x="${L}" y="${T}" width="${P}" height="${P}" fill="none" class="axis" stroke="var(--line-2)"/>${grid}
+    <line class="ideal" x1="${sx(lo)}" y1="${sy(lo)}" x2="${sx(hi)}" y2="${sy(hi)}"/>
+    ${dots(tb, C.gp, 2.1, 'GP')}${dots(tg, C.gen, 2.6, 'generated')}
+    <text x="${L + P / 2}" y="${T + P + 26}" text-anchor="middle">truth${raw ? '' : ' (z)'}</text></svg>`;
+}
+// Horizontal grouped bars, one group per row.
+function barRows(rows, series, opts = {}) {
+  const vals = rows.flatMap(r => series.map(s => r[s.key])).filter(fin);
+  if (!vals.length) return '';
+  const lo = Math.min(0, ...vals, opts.min ?? 0), hi = Math.max(...vals, opts.max ?? 0);
+  const W = 560, L = 170, R = 40, bh = 7, gap = 3, rowH = series.length * (bh + gap) + 10, H = rows.length * rowH + 22;
+  const x = v => L + (v - lo) / ((hi - lo) || 1) * (W - L - R);
+  const ticks = niceTicks(lo, hi, 5);
+  let g = ticks.map(t => `<line class="grid-l" x1="${x(t)}" x2="${x(t)}" y1="0" y2="${H - 18}"/><text x="${x(t)}" y="${H - 4}" text-anchor="middle">${tickFmt(t)}</text>`).join('');
+  rows.forEach((r, i) => {
+    const y0 = i * rowH + 4;
+    g += `<text x="${L - 8}" y="${y0 + (series.length * (bh + gap)) / 2 + 2}" text-anchor="end" style="fill:var(--ink)">${esc((r.label || r.trait || '').slice(0, 26))}</text>`;
+    series.forEach((s, j) => { const v = r[s.key]; if (!fin(v)) return;
+      const a = x(Math.min(0, v)), b = x(Math.max(0, v));
+      g += `<rect x="${a}" y="${y0 + j * (bh + gap)}" width="${Math.max(b - a, 1)}" height="${bh}" fill="${s.color}" data-tip="${esc(r.label || r.trait)}\n${esc(s.name)}: ${fmt(v, 3)}"/>`; });
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img">${g}<line class="axis" x1="${x(0)}" x2="${x(0)}" y1="0" y2="${H - 18}"/></svg>
+    <div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('')}</div>`;
+}
+function histChart(h, title, bare) {
+  if (!h) return '';
+  const W = 300, H = 150, L = 8, R = 8, T = 6, B = 22, n = h.real.length;
+  const top = Math.max(...h.real, ...h.generated) || 1;
+  const x = i => L + i / n * (W - L - R), y = v => T + (1 - v / top) * (H - T - B);
+  const area = h.real.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}L${x(i + 1)},${y(v)}`).join('');
+  const step = h.generated.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}L${x(i + 1)},${y(v)}`).join('');
+  const e = h.edges;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%">
+    <path d="${area}L${x(n)},${y(0)}L${x(0)},${y(0)}Z" fill="var(--blue)" fill-opacity=".28" stroke="var(--blue)" stroke-width="1"/>
+    <path d="${step}" fill="none" stroke="var(--gold)" stroke-width="1.8"/>
+    <line class="axis" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/>
+    <text x="${L}" y="${H - 6}">${tickFmt(e[0])}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${tickFmt(e[e.length - 1])}</text></svg>`;
+  return bare ? svg : `<div class="chart"><div class="t">${esc(title)}</div>${svg}</div>`;
+}
+function vbars(values, labels, color, title, opts = {}) {
+  const W = 560, H = 170, L = 36, R = 8, T = 8, B = 24, n = values.length, top = Math.max(...values, opts.ref || 0) || 1;
+  const bw = (W - L - R) / n, y = v => T + (1 - v / top) * (H - T - B);
+  const bars = values.map((v, i) => `<rect x="${L + i * bw + 1}" y="${y(v)}" width="${Math.max(bw - 2, 1)}" height="${y(0) - y(v)}" fill="${color}" data-tip="${esc(labels[i])}: ${pct(v)}"/>`).join('');
+  const ref = opts.ref ? `<line x1="${L}" x2="${W - R}" y1="${y(opts.ref)}" y2="${y(opts.ref)}" class="ideal"/><text x="${W - R}" y="${y(opts.ref) - 4}" text-anchor="end">${esc(opts.refLabel || '')}</text>` : '';
+  return `<div class="chart"><div class="t">${esc(title)}</div><svg viewBox="0 0 ${W} ${H}" width="100%">
+    ${niceTicks(0, top, 3).map(t => `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text x="${L - 5}" y="${y(t) + 3}" text-anchor="end">${pct(t, 0)}</text>`).join('')}
+    ${bars}${ref}<text x="${L}" y="${H - 6}">${esc(labels[0])}</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${esc(labels[n - 1])}</text></svg></div>`;
+}
+
+// --- Images & traits, Genetics ------------------------------------------------------
+async function pageData(m) {
+  const [im, tr] = await Promise.all([api(`/api/ds/${ds}/stage/images`), api(`/api/ds/${ds}/stage/traits`)]);
+  const r = im.report || {};
+  const traits = (tr.decision && tr.decision.traits) || [];
+  const cands = (tr.report && tr.report.candidates) || [];
+  tables = {};
+  m.innerHTML = head('Inputs', 'Images &amp; traits') + `
+    <div class="kpis">
+      <div class="kpi"><div class="label k">Images</div><div class="v">${fmt(r.n_images, 0)}</div><div class="d">${fmt(r.unreadable, 0)} unreadable · ${fmt(r.n_flagged, 0)} flagged</div></div>
+      <div class="kpi"><div class="label k">Background</div><div class="v" style="font-size:22px">${esc(r.background ? r.background.majority : '—')}</div></div>
+      <div class="kpi"><div class="label k">Subject</div><div class="v" style="font-size:22px">${r.subject ? fmt(r.subject.circularity_median, 2) : '—'}<small>circularity</small></div><div class="d">${r.subject ? `elongation ${fmt(r.subject.elongation_median, 2)} · size CV ${fmt(r.subject.size_cv, 2)}` : ''}</div></div>
+      <div class="kpi"><div class="label k">Canvas</div><div class="v">${fmt(r.canvas_px_suggested, 0)}<small>px → 512</small></div></div></div>
+    ${(r.drift_flagged || []).length ? `<div class="callout warn"><b>Batch drift.</b> Whole groups of images differ together: ${esc(r.drift_flagged.slice(0, 3).join('; '))}.
+      ${im.decision ? `Decision: scale normalised by <code>${esc(im.decision.normalise_scale_by || 'none')}</code>, intensity <code>${esc(im.decision.normalise_intensity || 'none')}</code>.` : ''}</div>` : ''}
+    ${r.objects && r.objects.edge_panel_share > 0.2 ? `<div class="callout">${pct(r.objects.edge_panel_share, 0)} of images carry an extra panel along an edge (legend, scale bar or label)${im.decision ? `; kept objects: <code>${esc(im.decision.keep_objects || 'all')}</code>` : ''}.</div>` : ''}
+    <div class="figs">${[...im.figures, ...tr.figures].map(f => `<figure><a href="${f.url}" target="_blank"><img loading="lazy" src="${f.url}" alt="${esc(f.name)}"></a><figcaption>${esc(f.name)}</figcaption></figure>`).join('')}</div>
+    ${(r.drift || []).length ? `<div class="card" style="margin-top:12px"><div class="card-head"><h3>Batch drift <span class="sub">share of each image feature's variance that lies between groups</span></h3><div class="actions">${csvBtn('drift')}</div></div><div style="margin-top:10px">
+      ${table('drift', r.drift, [['grouping', 'Grouping'], ['label', 'Feature'], ['groups', 'Groups', 'num'], ['images', 'Images', 'num'], ['eta2', 'Between-group share', 'pct'], ['eta2', '', 'bar'], ['median_ratio', 'Max / min median', 'num', 2], ['flagged', 'Flagged']])}</div></div>` : ''}
+    <div class="card" style="margin-top:12px"><div class="card-head"><h3>Traits scored</h3><div class="actions">${traits.length ? csvBtn('traits_scored') : ''}</div></div><div style="margin-top:10px">
+    ${traits.length ? table('traits_scored', traits, [['label', 'Trait'], ['measured_name', 'Measured as'], ['unit', 'Unit'], ['imported_match', 'Imported match']]) : '<div class="empty">Run the traits stage.</div>'}</div></div>
+    ${cands.length ? `<div class="card"><div class="card-head"><h3>All candidate measurements</h3><div class="actions">${csvBtn('candidates')}</div></div><div style="margin-top:10px">${table('candidates', cands, [['trait', 'Measurement'], ['cv', 'CV', 'num', 2], ['between_line_share', 'Between-line share', 'num', 2], ['best_match', 'Best imported match'], ['r_with_best_match', 'r', 'r']])}</div></div>` : ''}`;
+}
+async function pageGenetics(m) {
+  const g = await api(`/api/ds/${ds}/stage/genetics`);
+  const r = g.report;
+  if (!r) { m.innerHTML = head('Inputs', 'Genetics') + '<div class="empty">Run the genetic encoding stage.</div>'; return; }
+  tables = {};
+  const cvCols = r.trait_cv.length ? [['trait', 'Trait'], ...Object.keys(r.trait_cv[0]).filter(k => k !== 'trait').map(k => [k, k, 'r'])] : [];
+  m.innerHTML = head('Inputs', 'Genetics') + `<div class="kpis">
+    <div class="kpi"><div class="label k">Lines × markers</div><div class="v">${fmt(r.n_lines, 0)}<small>× ${fmt(r.n_markers, 0)}</small></div></div>
+    <div class="kpi"><div class="label k">Missing</div><div class="v">${fmt(r.missing_rate * 100, 2)}<small>%</small></div></div>
+    <div class="kpi"><div class="label k">Design</div><div class="v" style="font-size:20px">${r.sparse_design ? 'Sparse' : 'Dense panel'}</div><div class="d">${r.sparse_design ? 'few non-zero columns per line' : 'marker panel'}</div></div>
+    <div class="kpi"><div class="label k">PCs for 80 / 95%</div><div class="v">${fmt(r.pcs_for_variance['80%'], 0)}<small>/ ${fmt(r.pcs_for_variance['95%'], 0)}</small></div></div>
+    <div class="kpi"><div class="label k">Chosen encoding</div><div class="v gold" style="font-size:22px">${esc(g.decision ? g.decision.encoding : '—')}</div></div></div>
+    ${g.decision ? `<div class="notes">${esc(g.decision.notes)}</div>` : ''}
+    <div class="figs">${g.figures.map(f => `<figure><a href="${f.url}" target="_blank"><img src="${f.url}" alt="${esc(f.name)}"></a></figure>`).join('')}</div>
+    ${r.trait_cv.length ? `<div class="card" style="margin-top:12px"><div class="card-head"><h3>Cross-validated trait prediction by encoding <span class="sub">r</span></h3><div class="actions">${csvBtn('encoding_cv')}</div></div><div style="margin-top:10px">${table('encoding_cv', r.trait_cv, cvCols)}</div></div>` : ''}`;
+}
+
+// --- Training -------------------------------------------------------------------------
+async function pageTraining(m) {
+  const t = await api(`/api/ds/${ds}/training`);
+  if (!t.runs.length) { m.innerHTML = head('Models', 'Training') + '<div class="empty">No training runs yet. They appear here while training runs on this computer, or once you import the results from another machine (Pipeline, Import results).</div>'; return; }
+  m.innerHTML = head('Models', 'Training') + t.runs.map(r => {
+    const h = r.history, x = h.epoch || [];
+    const pick = (ks, cols) => ks.filter(k => h[k]).map((k, i) => ({name: k, y: h[k], color: cols[i]}));
+    const charts = r.kind === 'litevae'
+      ? [lineChart('Loss', x, pick(['train_loss', 'val_loss'], [C.b, C.a]), {log: true}),
+         lineChart('Reconstruction error vs all-white output', x, pick(['val_plain_mse', 'all_white_mse'], [C.a, C.c]), {log: true})]
+      : [lineChart('Loss', x, pick(['train_loss', 'val_loss', 'train_eval_loss'], [C.b, C.a, C.c]), {log: true}),
+         lineChart('Genotype gain · held-out vs trained', x, pick(['genotype_gain_heldout', 'genotype_gain_trained'], [C.a, C.b]), {zero: true}),
+         lineChart('Learning rate', x, pick(['lr'], [C.c]), {log: true})];
+    const s = r.summary || {};
+    const nAlert = r.issues.filter(i => i.severity !== 'info').length;
+    return `<div class="card"><div class="card-head"><h3>${esc(r.name)}</h3><span class="chip">${r.kind}</span>
+      <span class="chip ${r.issues.some(i => i.severity === 'fail') ? 'fail' : nAlert ? 'warn' : 'ok'}">${nAlert} alert${nAlert === 1 ? '' : 's'}</span></div>
+      <div class="kv" style="margin:12px 0">${Object.entries(s).map(([k, v]) => `<div>${esc(k.replace(/_/g, ' '))}</div><div>${fmt(v, 5)}</div>`).join('')}</div>
+      ${r.issues.map(i => `<div class="issue ${i.severity}"><b>${esc(i.check)}</b>: ${esc(i.detail)}<br><span style="color:var(--muted)">→ ${esc(i.action)}</span></div>`).join('')}
+      <div class="charts" style="margin-top:10px">${charts.join('')}</div>
+      ${r.previews.length ? `<h3>Latest previews</h3><div class="grid">${r.previews.map(p => `<a href="${p.url}" target="_blank"><img loading="lazy" src="${p.url}" alt="${esc(p.name)}" title="${esc(p.name)}"></a>`).join('')}</div>` : ''}</div>`;
+  }).join('');
+}
+
+// --- Results ----------------------------------------------------------------------------
+const RES_TABS = [['overview', 'Overview'], ['traits', 'Trait accuracy'], ['reliability', 'Seed reliability'], ['distributions', 'Distributions'],
+                  ['matching', 'Line matching'], ['memorisation', 'Memorisation'], ['baselines', 'Covariate baselines'], ['genes', 'Genes'], ['model', 'Model & QC'], ['examples', 'Examples']];
+async function pageResults(m) {
+  const r = resCache && resCache.ds === ds ? resCache.data : await api(`/api/ds/${ds}/results`);
+  resCache = {ds, data: r};
+  const roles = ['validation', 'test'].filter(k => r[k]);
+  if (!roles.length) { m.innerHTML = head('Analysis', 'Results') + '<div class="empty">Run the statistical analysis stage once a model is trained.</div>'; return; }
+  if (!r[resRole]) resRole = roles[0];
+  const a = r[resRole], ex = a.extras || {};
+  const avail = {baselines: (ex.baselines || []).length > 0, reliability: (ex.reliability || []).length > 0, distributions: (ex.distributions || []).length > 0,
+                 matching: !!(ex.line_matching && ex.line_matching.lines), memorisation: !!ex.memorisation, genes: !!r.genes && resRole === 'validation'};
+  const tabs = RES_TABS.filter(([k]) => avail[k] !== false);
+  if (!tabs.find(([k]) => k === resTab)) resTab = 'overview';
+  const exportMenu = `<details class="menu"><summary class="btn primary">↓ Export</summary><div class="items">
+      <a href="/api/ds/${ds}/export.zip">All results <span class="k">.zip · tables, JSON, figures</span></a>
+      <a href="/api/ds/${ds}/export.zip?images=1">All results + generated images <span class="k">.zip · large</span></a>
+      <div class="sep"></div>
+      <button onclick="exportJSON()">Results for ${esc(resRole)} lines <span class="k">.json</span></button>
+      <button onclick="exportTable('accuracy')">Trait accuracy <span class="k">.csv</span></button>
+      <button onclick="exportPoints()">Per-line scatter points <span class="k">.csv</span></button>
+    </div></details>`;
+  const roleSeg = roles.length > 1 ? `<div class="seg">${roles.map(k => `<button class="${k === resRole ? 'on' : ''}" onclick="resRole='${k}';render()">${k === 'test' ? 'Test (final)' : 'Validation'}</button>`).join('')}</div>` : `<span class="chip">${resRole} lines</span>`;
+  tables = {};
+  table('accuracy', a.accuracy, ACC_COLS, {name: 'trait_accuracy'});     // register for export from any tab
+  m.innerHTML = head('Analysis', 'Results', `<div class="row">${roleSeg}${exportMenu}</div>`) +
+    `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === resTab}" class="${k === resTab ? 'on' : ''}" onclick="resTab='${k}';render()">${l}</button>`).join('')}</div>
+     <div id="tabBody">${RES_RENDER[resTab](r, a, ex)}</div>`;
+}
+const ACC_COLS = [['label', 'Trait'], ['truth_column', 'Scored against'], ['n_lines', 'Lines', 'num'], ['r_generated', 'r generated', 'r'],
+                  ['r_genomic_prediction', 'r genomic prediction', 'r'], ['sd_ratio', 'SD ratio', 'num', 2]];
+function exportJSON() { const a = resCache.data[resRole]; download(`${ds}_${resRole}_results.json`, JSON.stringify(a, null, 1), 'application/json'); }
+function exportPoints() { const a = resCache.data[resRole]; download(`${ds}_${resRole}_scatter_points.csv`, csvOf(a.points)); }
+const labelOf = a => { const m = {}; a.accuracy.forEach(t => m[t.trait] = t.label || t.trait); return k => m[k] || k; };
+const mean = v => { v = v.filter(fin); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : NaN; };
+
+const RES_RENDER = {
+  genes(r, a) {
+    const G = r.genes, lab = k => (G.labels || {})[k] || k;
+    const sd = v => fin(v) ? (v > 0 ? '+' : '') + v.toFixed(2) + ' SD' : '—';
+    const genes = (G.genes || []);
+    const card = g => `<div class="card" style="margin:0"><div class="card-head"><h3 style="margin:0">${esc(g.control ? 'Control' : g.marker)}
+        <span class="sub">${g.control ? 'a column with no association' : esc(lab(g.trait))}</span></h3>
+        ${g.control ? '<span class="chip">baseline</span>' : g.suggestive_only ? '<span class="chip warn">not significant</span>' : g.reproduced === 'agrees' ? '<span class="chip ok">reproduced</span>' : g.reproduced === 'opposite' ? '<span class="chip fail">opposite direction</span>' : g.reproduced ? '<span class="chip">no clear change</span>' : ''}</div>
+      ${g.map_url ? `<a href="${g.map_url}" target="_blank"><img src="${g.map_url}" alt="Where switching ${esc(g.marker)} on changes the generated image" style="width:100%;border-radius:3px;margin-top:8px"></a>` : ''}
+      <table style="margin-top:6px"><tbody>
+        ${g.control ? '' : `<tr><td>GWAS p</td><td class="num">${fin(g.p) ? g.p.toExponential(1) : '—'}</td></tr>
+        <tr><td>GWAS effect (switched on)</td><td class="num">${sd(g.gwas_change_sd_units)}</td></tr>
+        <tr><td>Generated images, same switch</td><td class="num"><b>${sd(g.generated_change_sd_units)}</b></td></tr>
+        <tr><td>Carriers in the GWAS</td><td class="num">${fmt(g.carriers)}</td></tr>`}
+        <tr><td>Map strength vs control</td><td class="num">${fin(g.strength_vs_control) ? g.strength_vs_control.toFixed(1) + '×' : '—'}</td></tr>
+        <tr><td>Columns swapped · image pairs</td><td class="num">${fmt(g.block_size)} · ${fmt(g.pairs)}</td></tr>
+      </tbody></table></div>`;
+    return `<div class="callout">${G.source === 'ground truth' ? '<b>Ground truth genes</b> from the dataset' : `<b>GWAS</b> on ${fmt(G.lines)} training lines, ${fmt(G.markers_tested)} genotype columns`}${(G.covariates || []).length ? `, adjusted for ${(G.covariates || []).length} covariate columns` : ''}${G.genotype_pcs ? ` and ${G.genotype_pcs} genotype PCs` : ''}. Significant: p &lt; ${fin(G.bonferroni_p) ? G.bonferroni_p.toExponential(1) : '—'} (Bonferroni). Genomic inflation λ ${fmt(G.lambda_gc, 2)}.
+      Each map: the gene switched off and on in held-out lines with the same noise; the mean change, gold where the image gets lighter, blue where darker, on one colour scale for all genes. A map shows what the model is sensitive to, not proven biology.</div>
+      <div class="two" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">${genes.map(card).join('')}</div>
+      <div class="card" style="margin-top:12px"><div class="card-head"><h3>Significant genes per trait</h3></div>
+        <div class="row" style="margin-top:8px">${Object.entries(G.significant_hits || {}).map(([t, n]) => `<span class="chip ${n ? 'ok' : ''}">${esc(lab(t))} · ${n}</span>`).join('')}</div>
+        ${table('gwas_top', (G.top_hits || []).map(h => ({...h, label: lab(h.trait)})), [['label', 'Trait'], ['marker', 'Gene / marker'], ['beta_sd', 'Effect (SD per unit)', 'num', 2], ['p', 'p', 'num'], ['carriers', 'Carriers', 'num'], ['significant', 'Significant']])}</div>
+      ${G.gwas_figure ? `<div class="card"><h3>GWAS by trait</h3><img src="${G.gwas_figure}" alt="GWAS p-values per genotype column for each trait" style="width:100%"></div>` : ''}`;
+  },
+  overview(r, a, ex) {
+    const mg = mean(a.accuracy.map(t => t.r_generated)), mb = mean(a.accuracy.map(t => t.r_genomic_prediction));
+    const lm = ex.line_matching || {}, mem = ex.memorisation || {}, rel = ex.reliability || [], base = ex.baselines || [];
+    const memOk = /no sign/.test(mem.verdict || '');
+    const covMean = mean(base.map(b => b.r_covariates_only));
+    const lab = labelOf(a);
+    return `<div class="kpis">
+      <div class="kpi"><div class="label k">Mean r · generated</div><div class="v gold">${fmt(mg, 2)}</div><div class="d">over ${a.accuracy.length} traits</div></div>
+      <div class="kpi"><div class="label k">Mean r · genomic prediction</div><div class="v">${fmt(mb, 2)}</div><div class="d">ridge on all genotype columns</div></div>
+      <div class="kpi"><div class="label k">Lines × images</div><div class="v">${fmt(new Set(a.points.map(p => p.line)).size, 0)}</div><div class="d">${resRole} lines, never trained on</div></div>
+      ${lm.lines ? `<div class="kpi"><div class="label k">Line matching · top-1</div><div class="v">${pct(lm.top1)}</div><div class="d">${fmt(lm.top1 / lm.chance_top1, 0)}× chance (${pct(lm.chance_top1, 2)})</div></div>` : ''}
+      ${rel.length ? `<div class="kpi"><div class="label k">Reliability of a line mean</div><div class="v">${fmt(mean(rel.map(x => x.reliability_line_mean)), 2)}</div><div class="d">${rel[0].seeds_per_line} seeds per line</div></div>` : ''}
+      ${mem.verdict ? `<div class="kpi"><div class="label k">Memorisation</div><div class="v" style="font-size:20px;color:var(--${memOk ? 'ok' : 'warn'})">${memOk ? 'None found' : 'Check'}</div><div class="d">${esc(mem.verdict)}</div></div>` : ''}
+    </div>
+    ${base.length ? `<div class="callout warn"><b>Covariates in the genotype table.</b> ${ex.covariates.length} columns look like covariates (e.g. ${esc(ex.covariates.slice(0, 3).join(', '))}). Covariates alone reach mean r ${fmt(covMean, 2)}, so most of the accuracy may not be genetic. See <a href="#results" onclick="resTab='baselines';render();return false">Covariate baselines</a>.</div>` : ''}
+    <div class="card"><div class="card-head"><h3>Accuracy by trait <span class="sub">correlation with the truth on ${resRole} lines</span></h3><div class="actions">${csvBtn('accuracy')}</div></div>
+      <div style="margin-top:10px">${barRows(a.accuracy.map(t => ({...t, label: lab(t.trait)})), [{key: 'r_generated', name: 'generated images', color: C.gen}, {key: 'r_genomic_prediction', name: 'genomic prediction', color: C.gp}], {max: 1})}</div></div>`;
+  },
+  traits(r, a, ex) {
+    const su = ex.same_units || {};
+    const lab = labelOf(a);
+    return `<div class="card"><div class="card-head"><h3>Trait accuracy</h3><div class="actions">${csvBtn('accuracy')}<button class="ghost" onclick="exportPoints()">↓ Points CSV</button></div></div>
+      <p class="hint">Generated = the mean of each line's generated images; genomic prediction = ridge regression on every genotype column, fitted on the training lines. SD ratio below 1 means generated values spread less than the truth.</p>
+      ${table('accuracy', a.accuracy.map(t => ({...t, label: lab(t.trait)})), ACC_COLS, {name: 'trait_accuracy', bold: 'r_generated'})}</div>
+      <div class="legend" style="margin:14px 0 8px"><span><i style="background:var(--gold)"></i>generated (line mean)</span><span><i style="background:var(--grey)"></i>genomic prediction</span><span><i class="dash"></i>ideal (y = x): a perfect prediction</span><span>· hover a dot for its line</span></div>
+      <div class="charts">${a.accuracy.map(t => {
+        const raw = unitsMode[t.trait] ?? (su[t.trait] !== false);
+        return `<div class="chart"><div class="t">${esc(lab(t.trait))}<span>r ${fmt(t.r_generated, 2)} · GP ${fmt(t.r_genomic_prediction, 2)}</span></div>
+          ${scatterChart(a.points, t.trait, raw, lab(t.trait))}
+          <div class="row" style="justify-content:space-between;margin-top:2px"><span class="legend" style="margin:0">${raw ? 'raw units' : 'standardised (z)'}</span>
+          <div class="seg"><button class="${raw ? 'on' : ''}" onclick="unitsMode['${t.trait}']=true;render()" ${su[t.trait] === false ? 'disabled title="truth is in other units"' : ''}>Raw</button><button class="${raw ? '' : 'on'}" onclick="unitsMode['${t.trait}']=false;render()">z</button></div></div></div>`;
+      }).join('')}</div>`;
+  },
+  reliability(r, a, ex) {
+    const rel = ex.reliability || [], lab = labelOf(a);
+    return `<p class="lead">How much of the spread in generated values is between lines rather than between seeds of the same line. ICC is the between-line share for a single image; the line-mean reliability is for the mean of all seeds. Low values mean a trait needs more seeds per line.</p>
+      <div class="card"><div class="card-head"><h3>Seed reliability</h3><div class="actions">${csvBtn('reliability')}</div></div><div style="margin-top:10px">
+      ${table('reliability', rel.map(x => ({...x, label: lab(x.trait)})), [['label', 'Trait'], ['lines', 'Lines', 'num'], ['seeds_per_line', 'Seeds / line', 'num', 1], ['line_sd', 'Between-line SD', 'num'], ['seed_sd', 'Between-seed SD', 'num'],
+        ['icc_one_seed', 'ICC (1 image)', 'num', 2], ['reliability_line_mean', 'Reliability (line mean)', 'num', 2], ['reliability_line_mean', '', 'bar'], ['seeds_for_0.9', 'Seeds for 0.9', 'num']], {name: 'seed_reliability'})}</div></div>
+      <div class="card"><h3>Between-line share</h3>${barRows(rel.map(x => ({...x, label: lab(x.trait)})), [{key: 'icc_one_seed', name: 'one image (ICC)', color: C.b}, {key: 'reliability_line_mean', name: 'line mean of all seeds', color: C.a}], {max: 1})}</div>`;
+  },
+  distributions(r, a, ex) {
+    const dist = ex.distributions || [], lab = labelOf(a);
+    return `<p class="lead">Generated images against real images of the same lines, image by image. A mean shift of more than about 0.5 SD, or a KS distance above about 0.2, means the generated images are systematically different for that measurement.</p>
+      <div class="card"><div class="card-head"><h3>Generated vs real</h3><div class="actions">${csvBtn('distributions')}</div></div><div style="margin-top:10px">
+      ${table('distributions', dist.map(x => ({...x, label: lab(x.trait)})), [['label', 'Trait'], ['real_images', 'Real', 'num'], ['generated_images', 'Generated', 'num'], ['real_mean', 'Real mean', 'num'], ['generated_mean', 'Gen. mean', 'num'],
+        ['real_sd', 'Real SD', 'num'], ['generated_sd', 'Gen. SD', 'num'], ['mean_shift_in_real_sd', 'Shift (SD)', 'num', 2], ['ks_distance', 'KS distance', 'num', 2], ['histogram_overlap', 'Overlap', 'pct']], {name: 'distributions'})}</div></div>
+      <div class="legend" style="margin:14px 0 8px"><span><i style="background:var(--blue);opacity:.6"></i>real images</span><span><i class="line" style="background:var(--gold)"></i>generated images</span></div>
+      <div class="charts">${dist.map(d => histChart((ex.histograms || {})[d.trait], `${lab(d.trait)} · KS ${fmt(d.ks_distance, 2)}`)).join('')}</div>`;
+  },
+  matching(r, a, ex) {
+    const lm = ex.line_matching || {};
+    const labels = Array.from({length: 51}, (_, i) => i < 50 ? `rank ${i + 1}` : 'rank 51+');
+    const share = (lm.rank_hist || []).map(v => v / (lm.lines || 1));
+    const ks = Array.from({length: 50}, (_, i) => i + 1), cum = ks.map(k => share.slice(0, k).reduce((x, y) => x + y, 0));
+    return `<p class="lead">Can a line be recognised from its generated images alone? Each line's generated trait profile is compared with the real profiles of all ${fmt(lm.lines, 0)} evaluated lines; rank 1 means its own line was the closest. Uses ${esc((lm.traits_used || []).length)} traits, standardised.</p>
+      <div class="kpis">
+        <div class="kpi"><div class="label k">Top-1</div><div class="v gold">${pct(lm.top1)}</div><div class="d">chance ${pct(lm.chance_top1, 2)} · ${fmt(lm.top1 / lm.chance_top1, 1)}×</div></div>
+        <div class="kpi"><div class="label k">Top-5</div><div class="v">${pct(lm.top5)}</div><div class="d">chance ${pct(lm.chance_top5, 2)} · ${fmt(lm.top5 / lm.chance_top5, 1)}×</div></div>
+        <div class="kpi"><div class="label k">Median rank</div><div class="v">${fmt(lm.median_rank, 0)}<small>of ${fmt(lm.lines, 0)}</small></div><div class="d">chance ${fmt(lm.chance_median_rank, 0)}</div></div></div>
+      <div class="two">${lineChart('Own line within the top k', ks, [{name: 'generated images', y: cum, color: C.gen}, {name: 'chance', y: ks.map(k => k / (lm.lines || 1)), color: C.gp, dash: true}], {xlabel: 'k =', zero: true})}
+      ${vbars(share.slice(0, 50), labels.slice(0, 50), 'var(--gold)', `Rank of the own line (1–50; ${pct(share[50] || 0, 0)} beyond 50)`, {ref: 1 / (lm.lines || 1), refLabel: 'chance'})}</div>`;
+  },
+  memorisation(r, a, ex) {
+    const m = ex.memorisation || {}, ct = m.copy_test, h = m.history;
+    const ok = /no sign/.test(m.verdict || '');
+    const nnEdges = ct ? ct.hist_edges : [];
+    return `<div class="callout ${ok ? 'ok' : 'warn'}"><b>${ok ? 'No sign of memorisation.' : 'Possible memorisation.'}</b> ${ok ? 'Held-out lines gain about as much from their genotype as trained lines, and generated images are no closer to training images than real held-out images are.' : esc(m.verdict || '')}
+      ${ct && ct.nn_ratio > 1.3 ? `<br><span class="hint">Generated images sit further from the training images than real held-out images do (ratio ${fmt(ct.nn_ratio, 2)}). That points to a difference in image character, such as smoother texture (see Distributions), not to copying.</span>` : ''}</div>
+      <div class="kpis">
+        ${fin(m.gain_trained) ? `<div class="kpi"><div class="label k">Genotype gain · trained lines</div><div class="v">${pct(m.gain_trained, 2)}</div><div class="d">denoising error drop with the right genotype</div></div>
+        <div class="kpi"><div class="label k">Genotype gain · held-out</div><div class="v gold">${pct(m.gain_heldout, 2)}</div><div class="d">same, on lines never trained on</div></div>
+        <div class="kpi"><div class="label k">Trained / held-out</div><div class="v">${fmt(m.gain_ratio, 2)}<small>×</small></div><div class="d">above 1.5× suggests memorised genotypes</div></div>` : ''}
+        ${ct ? `<div class="kpi"><div class="label k">Near-copies</div><div class="v">${pct(ct.near_copy_share)}</div><div class="d">expected ~5% with no copying</div></div>
+        <div class="kpi"><div class="label k">Nearest-neighbour ratio</div><div class="v">${fmt(ct.nn_ratio, 2)}</div><div class="d">generated ÷ real held-out distance to training images; below 1 = closer</div></div>` : ''}
+      </div>
+      <div class="two">
+        ${h && h.epoch ? lineChart('Genotype gain over training', h.epoch, [{name: 'held-out lines', y: h.genotype_gain_heldout, color: C.a}, {name: 'trained lines', y: h.genotype_gain_trained, color: C.b}], {zero: true}) : ''}
+        ${ct ? `<div class="chart"><div class="t">Distance to the nearest training image<span>${ct.generated_images} generated · ${ct.heldout_real_images} real · ${ct.training_images_sampled} training</span></div>
+          ${histChart({edges: nnEdges, real: ct.hist_heldout_real, generated: ct.hist_generated}, '', true)}
+          <div class="legend"><span><i style="background:var(--blue);opacity:.6"></i>real held-out images</span><span><i class="line" style="background:var(--gold)"></i>generated images</span></div></div>` : ''}
+      </div>
+      ${a.pairs_figure ? `<div class="card" style="margin-top:12px"><h3>Closest generated–training pairs <span class="sub">left: generated · right: nearest training image (32 px greyscale distance)</span></h3>
+        <div class="row" style="align-items:flex-start;gap:18px"><img class="fig" src="${a.pairs_figure}" style="width:240px" alt="closest pairs">
+        ${table('closest_pairs', (ct && ct.closest_pairs) || [], [['generated', 'Generated'], ['training', 'Nearest training image'], ['distance', 'Distance', 'num']], {name: 'closest_pairs'})}</div></div>` : ''}`;
+  },
+  baselines(r, a, ex) {
+    const b = ex.baselines || [], lab = labelOf(a);
+    return `<p class="lead">The genotype table includes ${ex.covariates.length} covariate columns (${esc(ex.covariates.slice(0, 6).join(', '))}${ex.covariates.length > 6 ? ', …' : ''}). Ridge regressions on covariates only, on the markers only, and on everything show how much of the accuracy is genetic. When covariates alone match the model, the images mostly reflect the covariates.</p>
+      <div class="card"><div class="card-head"><h3>Accuracy by input</h3><div class="actions">${csvBtn('baselines')}</div></div><div style="margin-top:10px">
+      ${table('baselines', b.map(x => ({...x, label: lab(x.trait)})), [['label', 'Trait'], ['r_generated', 'Generated', 'r'], ['r_covariates_only', 'Covariates only', 'r'], ['r_markers_only', 'Markers only', 'r'], ['r_all_columns', 'All columns', 'r']], {name: 'covariate_baselines', bold: 'r_generated'})}</div></div>
+      <div class="card"><h3>Correlation with the truth</h3>${barRows(b.map(x => ({...x, label: lab(x.trait)})), [{key: 'r_generated', name: 'generated images', color: C.gen},
+        {key: 'r_covariates_only', name: 'covariates only', color: C.real}, {key: 'r_markers_only', name: 'markers only', color: 'var(--ok)'}, {key: 'r_all_columns', name: 'all columns', color: C.gp}], {max: 1})}</div>`;
+  },
+  model(r, a) {
+    const q = r.qc || {};
+    return `<div class="kpis">
+      <div class="kpi"><div class="label k">QC verdict</div><div class="v" style="font-size:22px;color:var(--${q.verdict === 'ok' ? 'ok' : 'warn'})">${esc(q.verdict || '—')}</div></div>
+      <div class="kpi"><div class="label k">Checkpoint scored</div><div class="v" style="font-size:16px;font-family:var(--f-mono)">${esc(q.recommended_checkpoint || '—')}</div></div>
+      <div class="kpi"><div class="label k">Genetic encoding</div><div class="v gold" style="font-size:22px">${esc((r.genetics || {}).encoding || '—')}</div></div></div>
+      ${(q.runs || []).map(run => `<div class="card"><div class="card-head"><h3>${esc(run.run)}</h3><span class="chip">${esc(run.kind)}</span></div>
+        <div class="kv" style="margin:12px 0">${['epochs', 'best_epoch', 'best_val_loss', 'gain_heldout'].filter(k => run[k] !== undefined).map(k => `<div>${k.replace(/_/g, ' ')}</div><div>${fmt(run[k], 5)}</div>`).join('')}</div>
+        ${(run.issues || []).map(i => `<div class="issue ${i.severity}"><b>${esc(i.check)}</b>: ${esc(i.detail)}</div>`).join('')}</div>`).join('')}
+      <p class="hint">Full curves and live alerts are on the <a href="#training">Training</a> page.</p>`;
+  },
+  examples(r) {
+    const e = r.examples || [];
+    return `<p class="lead">Lines never used in training: a real image beside the model's image from the genotype alone (seed 0).</p>
+      <div class="pairs">${e.map(x => `<div class="pair"><div class="imgs">${x.real_url ? `<img loading="lazy" src="${x.real_url}" alt="real ${esc(x.line)}">` : '<div></div>'}<img loading="lazy" src="${x.url}" alt="generated ${esc(x.line)}"></div>
+        <div class="cap"><span>${esc(x.line)}</span><span>${x.real_url ? 'real · generated' : 'generated'}</span></div></div>`).join('')}</div>`;
+  },
+};
+
+// --- Generate dataset -----------------------------------------------------------------------
+const GROUP_HELP = {validation: 'held out of training, used for model choice', trained: 'their real images trained the model',
+                    'never imaged': 'genotyped but never photographed: new predictions', test: 'sealed: final checks only'};
+let genBusy = false, genForm = null;
+async function pageGenerate(m, quiet) {
+  const x = await api(`/api/ds/${ds}/exports`);
+  const o = x.options || {};
+  genBusy = x.jobs.some(j => ['queued', 'generating', 'measuring', 'zipping'].includes(j.status));
+  const jobsHtml = x.jobs.length ? `<div class="table-wrap"><table><thead><tr><th>Export</th><th>Status</th><th class="num">Lines</th><th class="num">Per line</th><th class="num">Images</th><th>Progress</th><th class="num">Size</th><th></th></tr></thead><tbody>
+    ${x.jobs.map(j => `<tr><td style="font-family:var(--f-mono)">${esc(j.id)}</td>
+      <td><span class="chip ${j.status === 'done' ? 'ok' : j.status === 'failed' ? 'fail' : 'running'}">${esc(j.status)}</span></td>
+      <td class="num">${fmt(j.lines, 0)}</td><td class="num">${fmt(j.images_per_line, 0)}</td><td class="num">${fmt(j.total, 0)}</td>
+      <td class="bar" style="min-width:160px">${j.status === 'done' ? '' : `<div class="mini" data-tip="${esc(j.message)}"><span style="width:${Math.min(100, 100 * (j.done || 0) / (j.total || 1))}%"></span></div>`}<span class="hint">${esc(j.status === 'done' ? '' : j.message)}</span></td>
+      <td class="num">${j.zip_mb ? j.zip_mb + ' MB' : ''}</td>
+      <td style="text-align:right">${j.status === 'done' ? `<a class="btn primary" href="/api/ds/${ds}/exports/${j.id}/download">↓ Zip</a>` : ''}
+        ${['done', 'failed'].includes(j.status) ? `<button class="ghost" onclick="delExport('${j.id}')" title="Delete this export">✕</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No exports yet.</div>';
+  if (quiet && genForm && $('#genJobs')) { $('#genJobs').innerHTML = jobsHtml; return; }
+  const counts = o.counts || {};
+  const groups = ['validation', 'trained', 'never imaged'].filter(g => counts[g]);
+  m.innerHTML = head('Outputs', 'Generate dataset') + (!o.checkpoint
+    ? '<div class="empty">No trained model in the workspace yet.</div>'
+    : `<p class="lead">Generate images for chosen lines and download them as a zip with <code>metadata.csv</code>: one row per image with its line, seed, the line's group, covariates, real trait values and the traits measured on the generated image. Model: <code>${esc(o.checkpoint)}</code>.</p>
+    <div class="two"><form class="card" onsubmit="startExport(event)">
+      <h3>Which lines</h3>
+      <div class="row" style="gap:16px">${groups.map(g => `<label class="row" style="gap:6px" data-tip="${esc(GROUP_HELP[g] || '')}"><input type="checkbox" name="grp" value="${g}" ${g === 'validation' ? 'checked' : ''} onchange="genEstimate()">${esc(g)} <span class="hint" style="margin:0">(${fmt(counts[g], 0)})</span></label>`).join('')}</div>
+      <div class="row" style="margin-top:10px"><label class="label" for="gN">Number of lines</label><input type="text" id="gN" value="20" style="width:90px" oninput="genEstimate()"><span class="hint" style="margin:0">picked at random from the ticked groups</span></div>
+      <label class="label" style="display:block;margin-top:12px" for="gCustom">Or list lines (one per line or comma-separated)</label>
+      <textarea id="gCustom" style="min-height:70px" placeholder="${esc(((o.examples || {}).validation || []).slice(0, 3).join(', '))}" oninput="genEstimate()"></textarea>
+      <h3>Images</h3>
+      <div class="row"><label class="label" for="gK">Images per line</label><input type="text" id="gK" value="4" style="width:70px" oninput="genEstimate()">
+        <label class="label" for="gSeed" style="margin-left:12px">First seed</label><input type="text" id="gSeed" value="0" style="width:70px">
+        <label class="label" for="gSteps" style="margin-left:12px">Steps</label><input type="text" id="gSteps" value="50" style="width:70px"></div>
+      <h3>Metadata</h3>
+      <div class="row" style="gap:16px"><label class="row" style="gap:6px"><input type="checkbox" id="gMeasure" checked>measure traits on each image</label>
+        <label class="row" style="gap:6px"><input type="checkbox" id="gReal" checked>real trait values per line</label>
+        <label class="row" style="gap:6px"><input type="checkbox" id="gGeno">genotype rows</label></div>
+      ${counts.test ? `<div class="row" style="margin-top:10px"><label class="row" style="gap:6px"><input type="checkbox" id="gTest" onchange="genEstimate()"><span style="color:var(--warn)">include sealed test lines (${fmt(counts.test, 0)}; final check only)</span></label></div>` : ''}
+      <div class="row" style="margin-top:16px"><button class="primary" type="submit" id="gGo">Generate and zip</button><span id="gEst" class="hint" style="margin:0"></span></div>
+      <div id="gErr" class="err"></div></form>
+      <div class="card"><h3>What's in the zip</h3><pre>${esc(`${ds}_generated/
+  README.txt      settings and column guide
+  metadata.csv    one row per image
+  genotypes.csv   (optional) 0/1/2 rows
+  images/<line>_seed<s>.png`)}</pre>
+      <p class="hint">Same seed = same starting noise for every line, so images with equal seeds differ only by genotype. Images the analysis already made are reused. At most ${fmt(o.max_images, 0)} images per export.</p></div></div>`) +
+    `<div class="card" style="margin-top:12px"><h3>Exports</h3><div id="genJobs">${jobsHtml}</div></div>`;
+  genForm = true;
+  genEstimate();
+}
+function genSpec() {
+  const custom = ($('#gCustom') || {}).value || '';
+  const groups = [...document.querySelectorAll('input[name=grp]:checked')].map(i => i.value);
+  if ($('#gTest') && $('#gTest').checked) groups.push('test');
+  return {groups, n_lines: +$('#gN').value || 0,
+          custom_lines: custom.trim(), images_per_line: +$('#gK').value || 1, seed_start: +$('#gSeed').value || 0,
+          steps: +$('#gSteps').value || 50, measure: $('#gMeasure').checked, include_real_traits: $('#gReal').checked,
+          include_genotypes: $('#gGeno').checked, include_test: !!($('#gTest') && $('#gTest').checked)};
+}
+function genEstimate() {
+  if (!$('#gEst')) return;
+  const s = genSpec();
+  const nl = s.custom_lines ? s.custom_lines.split(/[\n,]+/).filter(x => x.trim()).length : s.n_lines;
+  const n = nl * s.images_per_line;
+  $('#gEst').textContent = `${fmt(nl, 0)} lines × ${fmt(s.images_per_line, 0)} = ${fmt(n, 0)} images`;
+}
+async function startExport(ev) {
+  ev.preventDefault(); $('#gErr').textContent = '';
+  try { await post(`/api/ds/${ds}/exports`, genSpec()); genForm = null; render(); } catch (e) { $('#gErr').textContent = (() => { try { return JSON.parse(e.message).detail; } catch (_) { return e.message; } })(); }
+}
+async function delExport(id) {
+  if (!confirm('Delete this export and its images?')) return;
+  await fetch(`/api/ds/${ds}/exports/${id}`, {method: 'DELETE'}); genForm = null; render();
+}
+
+// --- Activity & usage ---------------------------------------------------------------------
+async function pageActivity(m) {
+  const d = await api(`/api/ds/${ds}`);
+  const u = Object.entries(d.usage);
+  const tot = u.reduce((a, [, v]) => a + v.input_tokens + v.output_tokens, 0);
+  tables = {};
+  m.innerHTML = head('Operations', 'Activity &amp; usage') + `
+    <div class="card"><h3>Claude API tokens</h3>
+      ${u.length ? table('usage', u.map(([s, v]) => ({stage: s, ...v})), [['stage', 'Stage'], ['calls', 'Calls', 'num'], ['input_tokens', 'Input', 'num'], ['cache_read_input_tokens', 'Cached input', 'num'], ['output_tokens', 'Output', 'num']]) + `<p class="hint">Total ${tot.toLocaleString()} tokens. Rule-based, cached and Claude Code decisions use no API tokens.</p>`
+        : '<div class="empty">No API calls yet: every decision so far came from the rules, the cache or Claude Code.</div>'}</div>
+    <div class="card"><h3>Event log</h3><div class="log">${d.events.slice().reverse().map(e =>
+      `<div class="${e.level}"><span class="t">${new Date(e.t * 1000).toLocaleString()}</span> · <b>${esc(e.stage)}</b> · ${esc(e.message.split('\n').slice(-3).join(' '))}</div>`).join('')}</div></div>`;
+}
+document.addEventListener('click', e => { document.querySelectorAll('details.menu[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; }); });
+init();
+</script>
+</body>
+</html>
